@@ -11,11 +11,13 @@ object Actions {
     const val KILL = 4           // 击杀实体
     const val DROP = 5           // 丢出物品
     const val PICKUP = 6         // 捡起物品
+    const val PLACE_FIRE = 7     // 玩家点火 / 放岩浆（火焰与岩浆的追责日志）
 
     val NAMES: Map<Int, String> = mapOf(
         PLACE to "放置", BREAK to "破坏",
         CONTAINER_PUT to "放入", CONTAINER_TAKE to "取出",
         KILL to "击杀", DROP to "丢出", PICKUP to "捡起",
+        PLACE_FIRE to "点火",
     )
 }
 

@@ -253,9 +253,15 @@ class InspectorFeature : Feature() {
         if (material in InspectorStore.blockBlacklist) return
         if (!admit(actor)) return
 
+        // 玩家点火 / 放岩浆单独落一个动作码，方便 `/inspect lookup a:fire` 精准追责；
+        // 火焰蔓延、岩浆流动属于自然来源，不走这条（见 onBlockPlace 的自然分支）。
+        val action = if (kind == SourceKind.PLAYER &&
+            (material == "minecraft:fire" || material == "minecraft:lava")
+        ) Actions.PLACE_FIRE else Actions.PLACE
+
         enqueue(
             LogEvent(now(), dim(level), e.pos.x, e.pos.y, e.pos.z, actor, uuid, kind,
-                Actions.PLACE, material, 1, Nbt.blockEntityNbt(level, e.pos))
+                action, material, 1, Nbt.blockEntityNbt(level, e.pos))
         )
     }
 
@@ -714,6 +720,7 @@ class InspectorFeature : Feature() {
         "kill", "击杀" -> Actions.KILL
         "drop", "丢出" -> Actions.DROP
         "pickup", "捡起" -> Actions.PICKUP
+        "fire", "点火", "lava", "岩浆" -> Actions.PLACE_FIRE
         else -> null
     }
 
