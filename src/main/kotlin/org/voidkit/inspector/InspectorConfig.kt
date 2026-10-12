@@ -162,6 +162,22 @@ class InspectorConfig {
     /** 预览的有效期（秒）。超时后必须重新 preview 才能执行 rollback，防止拿旧预览回滚新世界。 */
     var rollbackPreviewTtlSeconds: Int = 300
 
+    // ---------- 因果链聚类（issue #8 第 3 层） ----------
+
+    /**
+     * 链的时间间隔阈值（分钟）：同一玩家相邻两次操作的间隔超过该时长即断链，
+     * 后面的操作归入新链。「拆箱子 → 拿东西 → 放 TNT → 炸」这类破坏通常发生在
+     * 几分钟内连续完成，5 分钟能把它们连成一条链，又不至于把两个独立事件误并。
+     */
+    var chainIdleMinutes: Int = 5
+
+    /**
+     * 链的空间半径（格）：新事件与链上最近事件的距离超过该值即断链。
+     * 破坏现场通常在几十格范围内（一个基地 / 仓库区），32 格足以覆盖
+     * 「拆外围 → 进内部 → 爆中心」的移动轨迹，又不会把隔壁建筑误并进同一条链。
+     */
+    var chainRadiusBlocks: Int = 32
+
     fun normalize() {
         // ⚠️ Gson 用 Unsafe 分配对象，缺字段会落成零值 —— 每加一个字段这里都要兜底
         if (databaseFile == null || databaseFile.isBlank()) databaseFile = "inspector/inspector.db"
@@ -189,6 +205,8 @@ class InspectorConfig {
             "immersiveengineering", "thermal",
         )
         if (rollbackPreviewTtlSeconds < 30) rollbackPreviewTtlSeconds = 300
+        if (chainIdleMinutes < 1) chainIdleMinutes = 5
+        if (chainRadiusBlocks < 1) chainRadiusBlocks = 32
     }
 
     /** 统一小写 + 去空白后的集合，避免 `Minecraft:Diamond ` 这种写法漏判。 */
@@ -237,6 +255,9 @@ object InspectorComments {
         "rollbackMachineNamespaces" to "机器命名空间名单：这些模组的无 NBT 结构零件（线缆/传动件/管道）默认跳过不回滚。\n" +
             "带 NBT 的模组机器（Create/Mek/AE2 机器等）一律默认跳过，需 --include-machines 显式确认。",
         "rollbackPreviewTtlSeconds" to "预览有效期（秒）。超时后必须重新 preview 才能执行 rollback。",
+        "chainIdleMinutes" to "因果链的时间断链阈值（分钟）：同一玩家相邻操作间隔超过即断成两条链。\n" +
+            "/inspect chain 按它聚类，/inspect rollback chain:玩家:链id 整链回滚。",
+        "chainRadiusBlocks" to "因果链的空间断链阈值（格）：新事件与链上最近事件距离超过即断链。",
     )
 }
 

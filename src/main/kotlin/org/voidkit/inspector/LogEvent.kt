@@ -12,12 +12,13 @@ object Actions {
     const val DROP = 5           // 丢出物品
     const val PICKUP = 6         // 捡起物品
     const val PLACE_FIRE = 7     // 玩家点火 / 放岩浆（火焰与岩浆的追责日志）
+    const val ROLLBACK = 8       // 整链回滚执行（审计回滚操作本身：谁在何时回滚了哪条链）
 
     val NAMES: Map<Int, String> = mapOf(
         PLACE to "放置", BREAK to "破坏",
         CONTAINER_PUT to "放入", CONTAINER_TAKE to "取出",
         KILL to "击杀", DROP to "丢出", PICKUP to "捡起",
-        PLACE_FIRE to "点火",
+        PLACE_FIRE to "点火", ROLLBACK to "回滚",
     )
 }
 

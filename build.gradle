@@ -46,6 +46,13 @@ dependencies {
     // Kotlin 运行时也由 core jar 携带（core 是唯一 jarJar kotlin 的），这里不重复 jarJar。
     compileOnly files('libs/voidkit_core-1.2.0.jar')
 
+    // 单元测试（ChainCluster 聚类逻辑是纯数据计算，不需要起 MC 服务端）。
+    // core 是 compileOnly，不进 test classpath —— 这里补一份，保证测试编译符号完整。
+    testImplementation files('libs/voidkit_core-1.2.0.jar')
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
     // 嵌入式 SQLite 驱动：jarJar 打进本 jar（版本区间只锁下界，让 FML 仲裁）。
     jarJar(implementation('org.xerial:sqlite-jdbc')) {
         version {
@@ -68,6 +75,13 @@ afterEvaluate {
 tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
     compilerOptions { freeCompilerArgs.add('-Xjvm-default=all') }
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+    }
 }
 
 processResources {

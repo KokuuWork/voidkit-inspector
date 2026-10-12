@@ -39,6 +39,8 @@ import org.voidkit.core.api.VoidkitServices
 import org.voidkit.core.util.ConfigFiles
 import org.voidkit.core.util.Msg
 import org.voidkit.core.util.Text
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -93,11 +95,14 @@ class InspectorFeature : Feature() {
     /** 进行中的回滚任务（同一时刻最多一个）。 */
     private var rollbackRun: RollbackRun? = null
 
-    /** 一次回滚预览：预览指纹（用于 rollback 校验）+ 构造好的回滚任务 + 创建时间。 */
-    private class PendingRollback(val key: String, val job: RollbackJob, val createdAt: Long)
+    /** 一次回滚预览：预览指纹（用于 rollback 校验）+ 构造好的回滚任务 + 创建时间 + 整链审计信息。 */
+    private class PendingRollback(val key: String, val job: RollbackJob, val createdAt: Long, val chainAudit: ChainAudit? = null)
 
-    /** 一次正在执行的回滚：任务 + 发起人（报告发给谁）。 */
-    private class RollbackRun(val job: RollbackJob, val playerUuid: UUID)
+    /** 一次正在执行的回滚：任务 + 发起人（报告发给谁）+ 整链回滚的审计信息（普通回滚为 null）。 */
+    private class RollbackRun(val job: RollbackJob, val playerUuid: UUID, val chainAudit: ChainAudit? = null)
+
+    /** 整链回滚完成后写进审计库的标记：位置取链中心，tag 形如 `chain:<玩家>:<链id>`。 */
+    private class ChainAudit(val world: String, val x: Int, val y: Int, val z: Int, val tag: String, val eventCount: Int, val executor: String)
 
     // ---------- 速率限制（主线程单线程访问，无需加锁） ----------
 
@@ -154,7 +159,7 @@ class InspectorFeature : Feature() {
         }
     }
 
-    /** 回滚任务每秒推进一批，跑完把报告发给发起人。 */
+    /** 回滚任务每秒推进一批，跑完把报告发给发起人。整链回滚完成后额外落一条审计。 */
     private fun tickRollback(server: MinecraftServer) {
         val run = rollbackRun ?: return
         run.job.tick(server)
@@ -166,6 +171,15 @@ class InspectorFeature : Feature() {
         } else {
             // 发起人已下线：报告落服务端日志，不能无声消失
             for (line in lines) VoidkitCore.LOG.info("[审计回滚] {}", line)
+        }
+        // 整链回滚的审计：回滚本身也是一次世界改动，得能查到「谁在何时回滚了哪条链」。
+        // 沿用现有 Source 入库机制，来源标记为 CHAIN；actor 记发起回滚的管理员。
+        val audit = run.chainAudit
+        if (audit != null) {
+            enqueue(
+                LogEvent(now(), audit.world, audit.x, audit.y, audit.z, audit.executor, null,
+                    SourceKind.CHAIN, Actions.ROLLBACK, audit.tag, audit.eventCount, null)
+            )
         }
     }
 
@@ -603,6 +617,14 @@ class InspectorFeature : Feature() {
                         .then(Commands.argument("filters", StringArgumentType.greedyString())
                             .executes { rollback(it.source, StringArgumentType.getString(it, "filters")) })
                 )
+                .then(
+                    Commands.literal("chain")
+                        .then(Commands.argument("player", StringArgumentType.word())
+                            .executes { chain(it.source, StringArgumentType.getString(it, "player"), "") })
+                        .then(Commands.argument("player", StringArgumentType.word())
+                            .then(Commands.argument("filters", StringArgumentType.greedyString())
+                                .executes { chain(it.source, StringArgumentType.getString(it, "player"), StringArgumentType.getString(it, "filters")) }))
+                )
         )
     }
 
@@ -689,6 +711,146 @@ class InspectorFeature : Feature() {
 
     private fun on(b: Boolean): String = if (b) "开" else "关"
 
+    // ---------- 因果链聚类（issue #8 第 3 层：破坏链识别与整链回滚） ----------
+
+    /** 链查询的默认时间窗：1 小时。 */
+    private val DEFAULT_CHAIN_WINDOW_MS = 3_600_000L
+
+    /**
+     * `/inspect chain <玩家> [t:时间]`：把该玩家时间窗内的操作按
+     * 「同一玩家 + 邻近区域 + 连续时间段」聚成操作链并列出，附整链回滚提示。
+     */
+    private fun chain(source: CommandSourceStack, target: String, filters: String): Int {
+        val player = source.player ?: run { Msg.err(source, "仅玩家可用"); return 0 }
+        val cfg = InspectorStore.config
+        val windowMs = parseChainWindow(filters) ?: DEFAULT_CHAIN_WINDOW_MS
+        val spec = InspectorDb.QuerySpec(
+            world = dim(player.level()),
+            actor = target,
+            since = System.currentTimeMillis() - windowMs,
+            limit = 500,
+        )
+        Msg.info(player, "正在聚类操作链…")
+        fetchAll(spec, cfg.maxRollbackEvents) { rows, error ->
+            if (error != null) {
+                Msg.err(player, "读取失败：$error")
+                return@fetchAll
+            }
+            if (rows.isEmpty()) {
+                Msg.info(player, "时间窗内没有 $target 的记录")
+                return@fetchAll
+            }
+            val chains = ChainCluster.cluster(rows, cfg.chainIdleMinutes, cfg.chainRadiusBlocks)
+            val fmt = SimpleDateFormat("MM-dd HH:mm:ss")
+            Msg.info(player, "===== $target 的操作链（共 ${chains.size} 条，时间窗 ${describeWindow(windowMs)}）=====")
+            for (c in chains) {
+                Msg.info(player, "#${c.id} ${fmt.format(Date(c.startTime))} ~ ${fmt.format(Date(c.endTime))} · ${c.eventCount} 事件 · ${c.blockCount} 方块 · 中心 @ ${c.centerX}, ${c.centerY}, ${c.centerZ}")
+                Msg.info(player, "    ${c.summary()}")
+                Msg.info(player, "    整链回滚：/inspect rollback chain:$target:${c.id} t:${describeWindow(windowMs)}")
+            }
+        }
+        return 1
+    }
+
+    /** 从过滤器里取 t: 时间窗（只认时间参数，其余忽略）；没有则 null（用默认窗）。 */
+    private fun parseChainWindow(filters: String): Long? {
+        var window: Long? = null
+        for (token in filters.split(Regex("\\s+"))) {
+            val idx = token.indexOf(':')
+            if (idx <= 0) continue
+            if (token.substring(0, idx).lowercase() in setOf("t", "time")) {
+                parseTime(token.substring(idx + 1))?.let { window = it }
+            }
+        }
+        return window
+    }
+
+    /** 把毫秒窗还原成 t: 参数（分钟取整，不整除退到秒），保证链列表与回滚提示能互相照抄。 */
+    private fun describeWindow(ms: Long): String =
+        if (ms > 0 && ms % 60_000L == 0L) "${ms / 60_000L}m" else "${ms / 1000L}s"
+
+    /** 链回滚参数：`chain:<玩家>:<链id>` + 可选 t: 时间窗与 --include-machines。 */
+    private class ChainRef(val target: String, val chainId: Int, val windowMs: Long, val includeMachines: Boolean)
+
+    /** 解析链回滚参数。格式不对时给出提示并返回 null。 */
+    private fun parseChainRef(player: ServerPlayer, args: String): ChainRef? {
+        val tokens = args.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+        val parts = tokens.first().removePrefix("chain:").split(':')
+        val target = parts.getOrNull(0)
+        val chainId = parts.getOrNull(1)?.toIntOrNull()
+        var windowMs = DEFAULT_CHAIN_WINDOW_MS
+        var includeMachines = false
+        for (token in tokens.drop(1)) {
+            val idx = token.indexOf(':')
+            if (idx <= 0) {
+                if (token == "--include-machines") includeMachines = true
+                continue
+            }
+            if (token.substring(0, idx).lowercase() in setOf("t", "time")) {
+                parseTime(token.substring(idx + 1))?.let { windowMs = it }
+            }
+        }
+        if (target.isNullOrBlank() || chainId == null || chainId < 1) {
+            Msg.err(player, "链回滚格式：/inspect rollback chain:<玩家>:<链id> [t:时间窗]（链 id 与时间窗以 /inspect chain <玩家> 的结果为准）")
+            return null
+        }
+        return ChainRef(target, chainId, windowMs, includeMachines)
+    }
+
+    /** 预览指纹：与普通回滚同思路，链回滚以「玩家 + 链 id + 时间窗」定位那批数据。 */
+    private fun chainKey(player: ServerPlayer, ref: ChainRef): String =
+        "chain=${ref.target}:${ref.chainId}|w=${dim(player.level())}|t=${ref.windowMs}|im=${ref.includeMachines}"
+
+    private fun previewChainRollback(player: ServerPlayer, args: String): Int {
+        val cfg = InspectorStore.config
+        val ref = parseChainRef(player, args) ?: return 0
+        val spec = InspectorDb.QuerySpec(
+            world = dim(player.level()),
+            actor = ref.target,
+            since = System.currentTimeMillis() - ref.windowMs,
+            limit = 500,
+        )
+        Msg.info(player, "正在读取审计记录…")
+        fetchAll(spec, cfg.maxRollbackEvents) { rows, error ->
+            if (error != null) {
+                Msg.err(player, "读取失败：$error")
+                return@fetchAll
+            }
+            val chain = ChainCluster.cluster(rows, cfg.chainIdleMinutes, cfg.chainRadiusBlocks)
+                .firstOrNull { it.id == ref.chainId }
+            if (chain == null) {
+                Msg.err(player, "时间窗内没有链 #${ref.chainId} —— 先 /inspect chain ${ref.target} 确认链 id 与 t: 时间窗一致")
+                return@fetchAll
+            }
+            // 回滚要「倒序撤销」：链内事件按审计 id 从新到旧交给任务构造器
+            val job = RollbackJob.create(
+                chain.events.sortedByDescending { it.id },
+                ref.includeMachines,
+                cfg.idSet(cfg.rollbackMachineNamespaces),
+                cfg.rollbackBlocksPerSecond,
+                chain.world,
+            )
+            val key = chainKey(player, ref)
+            val audit = ChainAudit(chain.world, chain.centerX, chain.centerY, chain.centerZ,
+                "chain:${ref.target}:${ref.chainId}", chain.eventCount, Source.playerName(player))
+            pendingRollback[player.uuid] = PendingRollback(key, job, System.currentTimeMillis(), audit)
+            val fmt = SimpleDateFormat("MM-dd HH:mm:ss")
+            val lines = ArrayList<String>()
+            lines += "===== 整链回滚预览（链 #${chain.id}，${chain.eventCount} 条记录）====="
+            lines += "玩家 ${chain.playerNames} ｜ ${fmt.format(Date(chain.startTime))} ~ ${fmt.format(Date(chain.endTime))} ｜ ${chain.summary()}"
+            lines += "直接还原方块 ${job.previewNormal}｜还原容器/含数据 ${job.previewNbt}｜清除放置 ${job.previewRemove}｜恢复物品 ${job.previewItems} 组"
+            val skipTotal = job.previewMachineSkips.values.sum()
+            if (skipTotal > 0) {
+                lines += "默认跳过机器/结构零件 $skipTotal 处（防断网络，宁可不回滚也不回滚一半）："
+                for ((mat, n) in job.previewMachineSkips.entries.take(8)) lines += "  $mat ×$n"
+                if (!ref.includeMachines) lines += "确认连机器一起回滚：加 --include-machines 重新 preview"
+            }
+            lines += "确认执行：/inspect rollback chain:${ref.target}:${ref.chainId} t:${describeWindow(ref.windowMs)}${if (ref.includeMachines) " --include-machines" else ""}（${cfg.rollbackPreviewTtlSeconds} 秒内有效）"
+            for (line in lines) Msg.info(player, line)
+        }
+        return 1
+    }
+
     // ---------- 智能回滚（issue #8 v1：分类感知 + 预览 + 执行） ----------
 
     /**
@@ -730,6 +892,8 @@ class InspectorFeature : Feature() {
             Msg.err(player, "回滚功能未开启（inspector.rollbackEnabled）")
             return 0
         }
+        // 整链回滚：chain:<玩家>:<链id> 开头走链路径，先聚类定位链，再复用同一套预览/执行
+        if (args.trim().startsWith("chain:")) return previewChainRollback(player, args)
         val parsed = parseRollbackArgs(player, args) ?: return 0
         val (spec, includeMachines) = parsed
         Msg.info(player, "正在读取审计记录…")
@@ -777,6 +941,29 @@ class InspectorFeature : Feature() {
         if (rollbackRun != null) {
             Msg.err(player, "已有一次回滚正在执行，等它跑完再发起下一次")
             return 0
+        }
+        // 整链回滚：校验链预览的指纹后，执行预览时构造好的那条链的回滚任务
+        if (args.trim().startsWith("chain:")) {
+            val ref = parseChainRef(player, args) ?: return 0
+            val pending = pendingRollback[player.uuid]
+            if (pending == null) {
+                Msg.err(player, "先执行 /inspect preview ${args.trim()} 预览，再确认执行")
+                return 0
+            }
+            if (pending.key != chainKey(player, ref)) {
+                Msg.err(player, "链参数与预览不一致 —— 请重新 preview（预览和执行必须用同一批数据）")
+                return 0
+            }
+            val ttlMs = cfg.rollbackPreviewTtlSeconds * 1000L
+            if (System.currentTimeMillis() - pending.createdAt > ttlMs) {
+                pendingRollback.remove(player.uuid)
+                Msg.err(player, "预览已过期，请重新 preview")
+                return 0
+            }
+            pendingRollback.remove(player.uuid)
+            rollbackRun = RollbackRun(pending.job, player.uuid, pending.chainAudit)
+            Msg.ok(player, "开始回滚链 #${ref.chainId}（每秒最多 ${cfg.rollbackBlocksPerSecond} 个操作），完成后出报告")
+            return 1
         }
         val parsed = parseRollbackArgs(player, args) ?: return 0
         val (spec, includeMachines) = parsed

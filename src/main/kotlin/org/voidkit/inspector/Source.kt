@@ -18,7 +18,8 @@ enum class SourceKind(val id: Int) {
     PLAYER(0),      // 真人玩家
     AUTOMATION(1),  // 假玩家 / 机械臂 / 管道 / 方块实体驱动的操作
     NATURAL(2),     // 树叶腐烂 / 流体 / 爆炸 / 生物 / 重力方块
-    OTHER(3);       // 无法归类
+    OTHER(3),       // 无法归类
+    CHAIN(4);       // 整链回滚的审计标记（操作者仍是发起回滚的管理员，见 ChainCluster）
 
     companion object {
         fun of(id: Int): SourceKind = entries.getOrElse(id) { OTHER }
