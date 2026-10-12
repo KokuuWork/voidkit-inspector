@@ -80,6 +80,9 @@ class InspectorFeature : Feature() {
     /** 数据库句柄。onServerStart 打开，onServerStop 关闭。 */
     private var db: InspectorDb? = null
 
+    /** 回滚撤销日志。onServerStart 打开，onServerStop 关闭（与审计库共文件，WAL 一写多读）。 */
+    private var journal: RollbackJournal? = null
+
     /** 处于检查模式的玩家。 */
     private val inspecting = ConcurrentHashMap.newKeySet<UUID>()
 
@@ -92,14 +95,30 @@ class InspectorFeature : Feature() {
     /** 玩家最近一次回滚预览（preview 与 rollback 用同一批数据，防止预览一套执行另一套）。 */
     private val pendingRollback = ConcurrentHashMap<UUID, PendingRollback>()
 
-    /** 进行中的回滚任务（同一时刻最多一个）。 */
+    /** 进行中的回滚/撤销任务（同一时刻最多一个）。 */
     private var rollbackRun: RollbackRun? = null
 
     /** 一次回滚预览：预览指纹（用于 rollback 校验）+ 构造好的回滚任务 + 创建时间 + 整链审计信息。 */
     private class PendingRollback(val key: String, val job: RollbackJob, val createdAt: Long, val chainAudit: ChainAudit? = null)
 
-    /** 一次正在执行的回滚：任务 + 发起人（报告发给谁）+ 整链回滚的审计信息（普通回滚为 null）。 */
-    private class RollbackRun(val job: RollbackJob, val playerUuid: UUID, val chainAudit: ChainAudit? = null)
+    /**
+     * 一次正在执行的回滚/撤销：任务（[RollbackJob] 或 [UndoJob]，都实现 [SteppedJob]）
+     * + 发起人（报告与审计的 actor，发起时记下名字防止下线后取不到）+ 启动时间 + 目标维度
+     * + journal 标签。回滚任务带 includeMachines 与整链审计信息；撤销任务带 undoEntryId。
+     */
+    private class RollbackRun(
+        val job: SteppedJob,
+        val playerUuid: UUID,
+        val executorName: String,
+        val startedAt: Long,
+        val dim: String,
+        val label: String = "",
+        val includeMachines: Boolean = false,
+        val chainAudit: ChainAudit? = null,
+        val undoEntryId: Long = -1L,
+        val undoCentroid: Triple<Int, Int, Int>? = null,
+        val undoActionCount: Int = 0,
+    )
 
     /** 整链回滚完成后写进审计库的标记：位置取链中心，tag 形如 `chain:<玩家>:<链id>`。 */
     private class ChainAudit(val world: String, val x: Int, val y: Int, val z: Int, val tag: String, val eventCount: Int, val executor: String)
@@ -128,11 +147,17 @@ class InspectorFeature : Feature() {
                 c.queryThreads,
                 c.purgeBatchSize,
             ).also { it.open() }
+            // 撤销日志与审计库共一个 SQLite 文件（WAL 一写多读）
+            if (journal == null) {
+                journal = RollbackJournal(path).also { it.open() }
+            }
         }
         purgeTick = 0
     }
 
     override fun onServerStop(server: MinecraftServer) {
+        journal?.close()
+        journal = null
         db?.close()
         db = null
         inspecting.clear()
@@ -159,7 +184,7 @@ class InspectorFeature : Feature() {
         }
     }
 
-    /** 回滚任务每秒推进一批，跑完把报告发给发起人。整链回滚完成后额外落一条审计。 */
+    /** 回滚/撤销任务每秒推进一批，跑完把报告发给发起人。随后按任务类型落 journal 与审计。 */
     private fun tickRollback(server: MinecraftServer) {
         val run = rollbackRun ?: return
         run.job.tick(server)
@@ -171,6 +196,29 @@ class InspectorFeature : Feature() {
         } else {
             // 发起人已下线：报告落服务端日志，不能无声消失
             for (line in lines) VoidkitCore.LOG.info("[审计回滚] {}", line)
+        }
+        // 撤销日志：回滚完成后把每个 target 的「回滚前快照」落库（异步，不占主线程），
+        // 供 rollback --undo 跨重启恢复。没有实际改动的回滚（全被跳过）不留 journal。
+        if (run.job is RollbackJob) {
+            val actions = run.job.drainUndoActions()
+            if (actions.isNotEmpty()) {
+                var sx = 0L; var sy = 0L; var sz = 0L
+                for (a in actions) { sx += a.x; sy += a.y; sz += a.z }
+                journal?.saveAsync(
+                    run.startedAt, run.executorName, run.dim, run.label, run.includeMachines,
+                    (sx / actions.size).toInt(), (sy / actions.size).toInt(), (sz / actions.size).toInt(),
+                    actions,
+                )
+            }
+        }
+        // 撤销完成的审计：撤销本身也是一次世界改动，得能查到「谁在何时撤销了哪次回滚」。
+        // 来源标记为 UNDO，actor 记发起撤销的管理员。
+        if (run.undoEntryId >= 0) {
+            val c = run.undoCentroid ?: Triple(0, 0, 0)
+            enqueue(
+                LogEvent(now(), run.dim, c.first, c.second, c.third, run.executorName, null,
+                    SourceKind.UNDO, Actions.ROLLBACK, "undo:${run.undoEntryId}", run.undoActionCount, null)
+            )
         }
         // 整链回滚的审计：回滚本身也是一次世界改动，得能查到「谁在何时回滚了哪条链」。
         // 沿用现有 Source 入库机制，来源标记为 CHAIN；actor 记发起回滚的管理员。
@@ -942,6 +990,11 @@ class InspectorFeature : Feature() {
             Msg.err(player, "已有一次回滚正在执行，等它跑完再发起下一次")
             return 0
         }
+        // 撤销：/inspect rollback --undo [jobId]，缺省撤销最近一次已执行的回滚
+        val trimmedArgs = args.trim()
+        if (trimmedArgs == "--undo" || trimmedArgs.startsWith("--undo ")) {
+            return undoRollback(player, trimmedArgs)
+        }
         // 整链回滚：校验链预览的指纹后，执行预览时构造好的那条链的回滚任务
         if (args.trim().startsWith("chain:")) {
             val ref = parseChainRef(player, args) ?: return 0
@@ -961,7 +1014,15 @@ class InspectorFeature : Feature() {
                 return 0
             }
             pendingRollback.remove(player.uuid)
-            rollbackRun = RollbackRun(pending.job, player.uuid, pending.chainAudit)
+            val audit = pending.chainAudit
+            if (audit == null) {
+                Msg.err(player, "链预览数据异常（缺少审计信息），请重新 preview")
+                return 0
+            }
+            rollbackRun = RollbackRun(
+                pending.job, player.uuid, Source.playerName(player), System.currentTimeMillis(),
+                audit.world, label = trimmedArgs, chainAudit = audit,
+            )
             Msg.ok(player, "开始回滚链 #${ref.chainId}（每秒最多 ${cfg.rollbackBlocksPerSecond} 个操作），完成后出报告")
             return 1
         }
@@ -983,8 +1044,88 @@ class InspectorFeature : Feature() {
             return 0
         }
         pendingRollback.remove(player.uuid)
-        rollbackRun = RollbackRun(pending.job, player.uuid)
+        rollbackRun = RollbackRun(
+            pending.job, player.uuid, Source.playerName(player), System.currentTimeMillis(),
+            spec.world ?: "未知维度", label = trimmedArgs, includeMachines = includeMachines,
+        )
         Msg.ok(player, "开始回滚（每秒最多 ${cfg.rollbackBlocksPerSecond} 个操作），完成后出报告")
+        return 1
+    }
+
+    // ---------- 回滚撤销（issue #8 第 5 层：rollback --undo） ----------
+
+    /**
+     * `/inspect rollback --undo [jobId]`：把一次已执行的回滚撤销掉，恢复到「回滚前」。
+     *
+     * - 缺省撤销最近一次已执行的回滚，也可指定 journal id；
+     * - 每个回滚只能撤销一次：journal 侧用 `UPDATE … WHERE undone=0` 原子抢占；
+     * - 只允许撤销时间窗内的回滚（rollbackUndoWindowMinutes，默认 30 分钟）；
+     * - 撤销走 [UndoJob]，与回滚同一套分帧推进机制。
+     */
+    private fun undoRollback(player: ServerPlayer, args: String): Int {
+        val cfg = InspectorStore.config
+        if (!cfg.rollbackUndoEnabled) {
+            Msg.err(player, "回滚撤销未开启（inspector.rollbackUndoEnabled）")
+            return 0
+        }
+        if (rollbackRun != null) {
+            Msg.err(player, "已有一次回滚/撤销正在执行，等它跑完再发起下一次")
+            return 0
+        }
+        val store = journal ?: run { Msg.err(player, "撤销日志未就绪"); return 0 }
+        val rest = args.removePrefix("--undo").trim()
+        val jobId = rest.toLongOrNull()
+        if (rest.isNotEmpty() && jobId == null) {
+            Msg.err(player, "用法：/inspect rollback --undo [jobId]（缺省撤销最近一次已执行的回滚）")
+            return 0
+        }
+        val windowMs = cfg.rollbackUndoWindowMinutes * 60_000L
+        Msg.info(player, "正在读取撤销日志…")
+        store.prepareUndoAsync(jobId, windowMs).whenComplete { prep, err ->
+            VoidkitServer.get()?.execute {
+                if (err != null) {
+                    Msg.err(player, "读取撤销日志失败：${err.message}")
+                    return@execute
+                }
+                when (prep) {
+                    is UndoPreparation.NotFound -> {
+                        if (jobId == null) Msg.info(player, "没有可撤销的回滚（时间窗内没有执行过回滚）")
+                        else Msg.err(player, "找不到回滚 #$jobId 的撤销日志")
+                    }
+                    is UndoPreparation.AlreadyUndone ->
+                        Msg.err(player, "该回滚已经撤销过 —— 每个回滚只能撤销一次")
+                    is UndoPreparation.WindowExpired ->
+                        Msg.err(player, "该回滚已超过撤销时间窗（${cfg.rollbackUndoWindowMinutes} 分钟），不能再撤销")
+                    is UndoPreparation.Ok -> {
+                        // 抢占成功后如果此刻已被别的任务占住，释放标记让这次撤销仍可重试
+                        if (rollbackRun != null) {
+                            Msg.err(player, "已有一次回滚/撤销正在执行，稍后再试")
+                            store.releaseUndoAsync(prep.entry.id)
+                            return@execute
+                        }
+                        val entry = prep.entry
+                        val job = UndoJob.create(entry, cfg.rollbackBlocksPerSecond)
+                        if (job.tasks.isEmpty()) {
+                            Msg.info(player, "该回滚没有实际改动世界（全部被跳过），无需撤销")
+                            return@execute
+                        }
+                        var sx = 0L; var sy = 0L; var sz = 0L
+                        for (a in entry.actions) { sx += a.x; sy += a.y; sz += a.z }
+                        val centroid = Triple(
+                            (sx / entry.actions.size).toInt(),
+                            (sy / entry.actions.size).toInt(),
+                            (sz / entry.actions.size).toInt(),
+                        )
+                        rollbackRun = RollbackRun(
+                            job, player.uuid, Source.playerName(player), System.currentTimeMillis(),
+                            entry.dim, label = "undo:${entry.id}", undoEntryId = entry.id,
+                            undoCentroid = centroid, undoActionCount = job.tasks.size,
+                        )
+                        Msg.ok(player, "开始撤销回滚 #${entry.id}（${entry.label}，每秒最多 ${cfg.rollbackBlocksPerSecond} 个操作），完成后出报告")
+                    }
+                }
+            }
+        }
         return 1
     }
 
