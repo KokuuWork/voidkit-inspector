@@ -887,11 +887,20 @@ class InspectorFeature : Feature() {
             lines += "===== 整链回滚预览（链 #${chain.id}，${chain.eventCount} 条记录）====="
             lines += "玩家 ${chain.playerNames} ｜ ${fmt.format(Date(chain.startTime))} ~ ${fmt.format(Date(chain.endTime))} ｜ ${chain.summary()}"
             lines += "直接还原方块 ${job.previewNormal}｜还原容器/含数据 ${job.previewNbt}｜清除放置 ${job.previewRemove}｜恢复物品 ${job.previewItems} 组"
-            val skipTotal = job.previewMachineSkips.values.sum()
+            val skipTotal = job.previewMachineComponents.sumOf { it.size }
             if (skipTotal > 0) {
-                lines += "默认跳过机器/结构零件 $skipTotal 处（防断网络，宁可不回滚也不回滚一半）："
-                for ((mat, n) in job.previewMachineSkips.entries.take(8)) lines += "  $mat ×$n"
+                lines += if (ref.includeMachines) {
+                    "机器/结构零件按整连通体回滚 $skipTotal 处（结构感知：不做半截回滚）："
+                } else {
+                    "默认跳过机器/结构零件 $skipTotal 处（按连通体聚合，宁可不回滚也不回滚一半）："
+                }
+                for (line in StructureSense.summarizeComponents(job.previewMachineComponents, ref.includeMachines)) lines += "  $line"
                 if (!ref.includeMachines) lines += "确认连机器一起回滚：加 --include-machines 重新 preview"
+            }
+            val dblTotal = job.previewDoubleBlockSkips.values.sum()
+            if (dblTotal > 0) {
+                lines += "双格方块（门/床）缺另一半记录，整体跳过 $dblTotal 处（结构感知：绝不回滚一半）："
+                for ((mat, n) in job.previewDoubleBlockSkips.entries.take(8)) lines += "  $mat ×$n"
             }
             lines += "确认执行：/inspect rollback chain:${ref.target}:${ref.chainId} t:${describeWindow(ref.windowMs)}${if (ref.includeMachines) " --include-machines" else ""}（${cfg.rollbackPreviewTtlSeconds} 秒内有效）"
             for (line in lines) Msg.info(player, line)
@@ -965,13 +974,22 @@ class InspectorFeature : Feature() {
             val lines = ArrayList<String>()
             lines += "===== 回滚预览（${rows.size} 条记录）====="
             lines += "直接还原方块 ${job.previewNormal}｜还原容器/含数据 ${job.previewNbt}｜清除放置 ${job.previewRemove}｜恢复物品 ${job.previewItems} 组"
-            val skipTotal = job.previewMachineSkips.values.sum()
+            val skipTotal = job.previewMachineComponents.sumOf { it.size }
             if (skipTotal > 0) {
-                lines += "默认跳过机器/结构零件 $skipTotal 处（防断网络，宁可不回滚也不回滚一半）："
-                for ((mat, n) in job.previewMachineSkips.entries.take(8)) lines += "  $mat ×$n"
+                lines += if (includeMachines) {
+                    "机器/结构零件按整连通体回滚 $skipTotal 处（结构感知：不做半截回滚）："
+                } else {
+                    "默认跳过机器/结构零件 $skipTotal 处（按连通体聚合，宁可不回滚也不回滚一半）："
+                }
+                for (line in StructureSense.summarizeComponents(job.previewMachineComponents, includeMachines)) lines += "  $line"
                 if (!includeMachines) {
                     lines += "确认连机器一起回滚：加 --include-machines 重新 preview"
                 }
+            }
+            val dblTotal = job.previewDoubleBlockSkips.values.sum()
+            if (dblTotal > 0) {
+                lines += "双格方块（门/床）缺另一半记录，整体跳过 $dblTotal 处（结构感知：绝不回滚一半）："
+                for ((mat, n) in job.previewDoubleBlockSkips.entries.take(8)) lines += "  $mat ×$n"
             }
             lines += "确认执行：/inspect rollback ${args.trim()}（需站在原位，${cfg.rollbackPreviewTtlSeconds} 秒内有效）"
             for (line in lines) Msg.info(player, line)
