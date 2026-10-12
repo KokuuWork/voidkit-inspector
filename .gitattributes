@@ -1,0 +1,4 @@
+# 统一行尾：文本默认 LF，Windows 批处理 CRLF（cmd 需要）
+* text=auto eol=lf
+*.bat text eol=crlf
+*.sh text eol=lf

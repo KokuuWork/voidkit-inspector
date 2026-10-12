@@ -1,0 +1,95 @@
+plugins {
+    id 'net.neoforged.moddev' version '2.0.148'
+    id 'org.jetbrains.kotlin.jvm' version '2.1.0'
+}
+
+// ==============================================================
+// Voidkit Inspector —— 操作审计查询（COI）
+//
+// 从 Voidkit 套件里拆出的独立模组：记录方块 / 容器 / 实体操作到嵌入式 SQLite，
+// 内置科技整合包（机械动力 / Mek / AE2）自动化产线过滤。
+//
+// 依赖 voidkit_core 前置：
+//   - 编译期：compileOnly libs/ 下的 core jar（用 ./fetch-core.sh 下载）
+//   - 运行期：由 mods.toml 声明 required，服主同时装 voidkit_core 即可
+// ==============================================================
+
+group = 'org.voidkit'
+version = '1.1.0'
+
+base { archivesName = 'voidkit_inspector' }
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+kotlin { jvmToolchain(21) }
+
+repositories {
+    // NeoForge 制品国内被 DNS 污染，走官方 CDN（详见 mirror.init.gradle）
+    maven { url = 'https://neoforged.forgecdn.net/releases' }
+    maven { url = 'https://maven.aliyun.com/repository/public' }
+    maven { url = 'https://maven.aliyun.com/repository/central' }
+    mavenCentral()
+}
+
+neoForge {
+    version = '21.1.209'
+    mods {
+        'voidkit_inspector' {
+            sourceSet(sourceSets.main)
+        }
+    }
+}
+
+dependencies {
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.1.0'
+
+    // core 前置：编译期依赖（compileOnly），运行时由服主同装 voidkit_core。
+    // Kotlin 运行时也由 core jar 携带（core 是唯一 jarJar kotlin 的），这里不重复 jarJar。
+    compileOnly files('libs/voidkit_core-1.1.0.jar')
+
+    // 嵌入式 SQLite 驱动：jarJar 打进本 jar（版本区间只锁下界，让 FML 仲裁）。
+    jarJar(implementation('org.xerial:sqlite-jdbc')) {
+        version {
+            strictly '[3.46,)'
+            prefer '3.53.4.0'
+        }
+    }
+}
+
+// ⚠️ 开发运行时（runServer）从 classes 目录加载本模组，jarJar 的嵌套 jar 不生效，
+//    所以必须把 Kotlin 运行时、SQLite 原生库、core 的类显式补进 run 的 classpath。
+afterEvaluate {
+    dependencies {
+        additionalRuntimeClasspath 'org.jetbrains.kotlin:kotlin-stdlib:2.1.0'
+        additionalRuntimeClasspath 'org.xerial:sqlite-jdbc:3.53.4.0'
+        additionalRuntimeClasspath files('libs/voidkit_core-1.1.0.jar')
+    }
+}
+
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+    compilerOptions { freeCompilerArgs.add('-Xjvm-default=all') }
+}
+
+processResources {
+    def props = [
+        mod_version : version,
+        neo_range   : '[21.1.0,21.2.0)',
+        mc_range    : '[1.21.1,1.22)',
+        loader_range: '[4,)',
+    ]
+    inputs.properties props
+    filesMatching(['META-INF/neoforge.mods.toml']) { expand props }
+}
+
+jar {
+    manifest {
+        attributes([
+            'Specification-Title'   : 'voidkit_inspector',
+            'Specification-Vendor'  : 'Kokuu Studio',
+            'Specification-Version' : '1',
+            'Implementation-Title'  : 'inspector',
+            'Implementation-Version': version,
+            'Implementation-Vendor' : 'Kokuu Studio',
+        ])
+    }
+}
