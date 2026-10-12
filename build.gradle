@@ -15,7 +15,7 @@ plugins {
 // ==============================================================
 
 group = 'org.voidkit'
-version = '1.1.0'
+version = '1.2.0'
 
 base { archivesName = 'voidkit_inspector' }
 
@@ -44,7 +44,7 @@ dependencies {
 
     // core 前置：编译期依赖（compileOnly），运行时由服主同装 voidkit_core。
     // Kotlin 运行时也由 core jar 携带（core 是唯一 jarJar kotlin 的），这里不重复 jarJar。
-    compileOnly files('libs/voidkit_core-1.1.0.jar')
+    compileOnly files('libs/voidkit_core-1.2.0.jar')
 
     // 嵌入式 SQLite 驱动：jarJar 打进本 jar（版本区间只锁下界，让 FML 仲裁）。
     jarJar(implementation('org.xerial:sqlite-jdbc')) {
@@ -61,7 +61,7 @@ afterEvaluate {
     dependencies {
         additionalRuntimeClasspath 'org.jetbrains.kotlin:kotlin-stdlib:2.1.0'
         additionalRuntimeClasspath 'org.xerial:sqlite-jdbc:3.53.4.0'
-        additionalRuntimeClasspath files('libs/voidkit_core-1.1.0.jar')
+        additionalRuntimeClasspath files('libs/voidkit_core-1.2.0.jar')
     }
 }
 
