@@ -32,6 +32,7 @@ class VoidkitInspector(bus: IEventBus, container: ModContainer) {
                 "inspector.logContainers" to c.logContainers,
                 "inspector.logKills" to c.logKills,
                 "inspector.retentionDays" to c.retentionDays,
+                "inspector.rollbackEnabled" to c.rollbackEnabled,
             )
         }
 

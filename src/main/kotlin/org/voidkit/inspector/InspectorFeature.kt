@@ -87,6 +87,18 @@ class InspectorFeature : Feature() {
     /** 玩家最近一次查询，供 `/inspect page` 翻页。 */
     private val lookups = ConcurrentHashMap<UUID, LookupState>()
 
+    /** 玩家最近一次回滚预览（preview 与 rollback 用同一批数据，防止预览一套执行另一套）。 */
+    private val pendingRollback = ConcurrentHashMap<UUID, PendingRollback>()
+
+    /** 进行中的回滚任务（同一时刻最多一个）。 */
+    private var rollbackRun: RollbackRun? = null
+
+    /** 一次回滚预览：预览指纹（用于 rollback 校验）+ 构造好的回滚任务 + 创建时间。 */
+    private class PendingRollback(val key: String, val job: RollbackJob, val createdAt: Long)
+
+    /** 一次正在执行的回滚：任务 + 发起人（报告发给谁）。 */
+    private class RollbackRun(val job: RollbackJob, val playerUuid: UUID)
+
     // ---------- 速率限制（主线程单线程访问，无需加锁） ----------
 
     private var tickWindow = 0L
@@ -121,6 +133,8 @@ class InspectorFeature : Feature() {
         inspecting.clear()
         openContainers.clear()
         lookups.clear()
+        pendingRollback.clear()
+        rollbackRun = null
     }
 
     override fun onReload(server: MinecraftServer) {
@@ -130,11 +144,28 @@ class InspectorFeature : Feature() {
     }
 
     override fun onSecond(server: MinecraftServer) {
+        // 回滚分帧执行：即使模块被临时关掉，跑了一半的回滚也要收尾，不能留半截世界
+        tickRollback(server)
         if (!enabled) return
         // 每 6 小时清理一次过期记录
         if (++purgeTick >= 6 * 3600) {
             purgeTick = 0
             schedulePurge()
+        }
+    }
+
+    /** 回滚任务每秒推进一批，跑完把报告发给发起人。 */
+    private fun tickRollback(server: MinecraftServer) {
+        val run = rollbackRun ?: return
+        run.job.tick(server)
+        val lines = run.job.pollReport() ?: return
+        rollbackRun = null
+        val player = server.playerList.getPlayer(run.playerUuid)
+        if (player != null) {
+            for (line in lines) Msg.info(player, line)
+        } else {
+            // 发起人已下线：报告落服务端日志，不能无声消失
+            for (line in lines) VoidkitCore.LOG.info("[审计回滚] {}", line)
         }
     }
 
@@ -341,6 +372,7 @@ class InspectorFeature : Feature() {
         inspecting.remove(player.uuid)
         openContainers.remove(player.uuid)
         lookups.remove(player.uuid)
+        pendingRollback.remove(player.uuid)
     }
 
     private fun snapshotContainer(player: ServerPlayer, menu: net.minecraft.world.inventory.AbstractContainerMenu): OpenContainer? {
@@ -561,6 +593,16 @@ class InspectorFeature : Feature() {
                         .then(Commands.argument("days", IntegerArgumentType.integer(1))
                             .executes { purge(it.source, IntegerArgumentType.getInteger(it, "days")) })
                 )
+                .then(
+                    Commands.literal("preview")
+                        .then(Commands.argument("filters", StringArgumentType.greedyString())
+                            .executes { previewRollback(it.source, StringArgumentType.getString(it, "filters")) })
+                )
+                .then(
+                    Commands.literal("rollback")
+                        .then(Commands.argument("filters", StringArgumentType.greedyString())
+                            .executes { rollback(it.source, StringArgumentType.getString(it, "filters")) })
+                )
         )
     }
 
@@ -646,6 +688,154 @@ class InspectorFeature : Feature() {
     }
 
     private fun on(b: Boolean): String = if (b) "开" else "关"
+
+    // ---------- 智能回滚（issue #8 v1：分类感知 + 预览 + 执行） ----------
+
+    /**
+     * 回滚查询用比 lookup 更大的分页（500/页），时间窗 / 半径 / 玩家三要素都必填 ——
+     * 回滚是世界改动操作，宁可让管理员多打几个字，也不做含糊的默认值。
+     */
+    private fun parseRollbackArgs(player: ServerPlayer, args: String): Pair<InspectorDb.QuerySpec, Boolean>? {
+        val includeMachines = args.contains("--include-machines")
+        val base = buildLookup(player, args)
+        if (base.actor.isNullOrBlank()) {
+            Msg.err(player, "必须指定玩家：u:名字（这是回滚的安全带）")
+            return null
+        }
+        if (base.since == null) {
+            Msg.err(player, "必须指定时间窗：t:1h / t:30m / t:1d（防止误回滚太老的数据）")
+            return null
+        }
+        if ((base.radius ?: 0) > InspectorStore.config.maxRollbackRadius) {
+            Msg.err(player, "半径超过上限 ${InspectorStore.config.maxRollbackRadius}，分区域多次回滚更安全")
+            return null
+        }
+        val spec = InspectorDb.QuerySpec(
+            world = base.world, x = base.x, y = base.y, z = base.z, radius = base.radius,
+            actor = base.actor, action = base.action, material = base.material,
+            since = base.since, limit = 500,
+        )
+        return spec to includeMachines
+    }
+
+    /** 预览指纹：rollback 必须带一模一样的过滤参数 + 站在原位，才能执行对应的那批预览数据。 */
+    private fun rollbackKey(spec: InspectorDb.QuerySpec, includeMachines: Boolean): String =
+        "u=${spec.actor}|w=${spec.world}|p=${spec.x},${spec.y},${spec.z}|r=${spec.radius}" +
+            "|t=${spec.since}|a=${spec.action}|m=${spec.material}|im=$includeMachines"
+
+    private fun previewRollback(source: CommandSourceStack, args: String): Int {
+        val player = source.player ?: run { Msg.err(source, "仅玩家可用"); return 0 }
+        val cfg = InspectorStore.config
+        if (!cfg.rollbackEnabled) {
+            Msg.err(player, "回滚功能未开启（inspector.rollbackEnabled）")
+            return 0
+        }
+        val parsed = parseRollbackArgs(player, args) ?: return 0
+        val (spec, includeMachines) = parsed
+        Msg.info(player, "正在读取审计记录…")
+        fetchAll(spec, cfg.maxRollbackEvents) { rows, error ->
+            if (error != null) {
+                Msg.err(player, "读取失败：$error")
+                return@fetchAll
+            }
+            if (rows.isEmpty()) {
+                Msg.info(player, "没有找到可回滚的记录")
+                return@fetchAll
+            }
+            val job = RollbackJob.create(
+                rows, includeMachines,
+                cfg.idSet(cfg.rollbackMachineNamespaces),
+                cfg.rollbackBlocksPerSecond,
+                spec.world ?: "未知维度",
+            )
+            val key = rollbackKey(spec, includeMachines)
+            pendingRollback[player.uuid] = PendingRollback(key, job, System.currentTimeMillis())
+            val lines = ArrayList<String>()
+            lines += "===== 回滚预览（${rows.size} 条记录）====="
+            lines += "直接还原方块 ${job.previewNormal}｜还原容器/含数据 ${job.previewNbt}｜清除放置 ${job.previewRemove}｜恢复物品 ${job.previewItems} 组"
+            val skipTotal = job.previewMachineSkips.values.sum()
+            if (skipTotal > 0) {
+                lines += "默认跳过机器/结构零件 $skipTotal 处（防断网络，宁可不回滚也不回滚一半）："
+                for ((mat, n) in job.previewMachineSkips.entries.take(8)) lines += "  $mat ×$n"
+                if (!includeMachines) {
+                    lines += "确认连机器一起回滚：加 --include-machines 重新 preview"
+                }
+            }
+            lines += "确认执行：/inspect rollback ${args.trim()}（需站在原位，${cfg.rollbackPreviewTtlSeconds} 秒内有效）"
+            for (line in lines) Msg.info(player, line)
+        }
+        return 1
+    }
+
+    private fun rollback(source: CommandSourceStack, args: String): Int {
+        val player = source.player ?: run { Msg.err(source, "仅玩家可用"); return 0 }
+        val cfg = InspectorStore.config
+        if (!cfg.rollbackEnabled) {
+            Msg.err(player, "回滚功能未开启（inspector.rollbackEnabled）")
+            return 0
+        }
+        if (rollbackRun != null) {
+            Msg.err(player, "已有一次回滚正在执行，等它跑完再发起下一次")
+            return 0
+        }
+        val parsed = parseRollbackArgs(player, args) ?: return 0
+        val (spec, includeMachines) = parsed
+        val pending = pendingRollback[player.uuid]
+        if (pending == null) {
+            Msg.err(player, "先执行 /inspect preview ${args.trim()} 预览，再确认执行")
+            return 0
+        }
+        if (pending.key != rollbackKey(spec, includeMachines)) {
+            Msg.err(player, "过滤参数与预览不一致 —— 请重新 preview（预览和执行必须用同一批数据）")
+            return 0
+        }
+        val ttlMs = cfg.rollbackPreviewTtlSeconds * 1000L
+        if (System.currentTimeMillis() - pending.createdAt > ttlMs) {
+            pendingRollback.remove(player.uuid)
+            Msg.err(player, "预览已过期，请重新 preview")
+            return 0
+        }
+        pendingRollback.remove(player.uuid)
+        rollbackRun = RollbackRun(pending.job, player.uuid)
+        Msg.ok(player, "开始回滚（每秒最多 ${cfg.rollbackBlocksPerSecond} 个操作），完成后出报告")
+        return 1
+    }
+
+    /**
+     * 按游标翻页拉取全部记录（runQuery 单页上限 500），拉满 [cap] 条为止。
+     * 回调回到主线程执行，和 runLookup 同一套线程约定。
+     */
+    private fun fetchAll(spec: InspectorDb.QuerySpec, cap: Int, cb: (List<InspectorDb.QueryRow>, String?) -> Unit) {
+        val all = ArrayList<InspectorDb.QueryRow>()
+        fun step(store: InspectorDb, cursor: Long?) {
+            val page = InspectorDb.QuerySpec(
+                world = spec.world, x = spec.x, y = spec.y, z = spec.z, radius = spec.radius,
+                actor = spec.actor, action = spec.action, material = spec.material,
+                since = spec.since, until = spec.until, limit = 500, beforeId = cursor,
+            )
+            store.queryAsync(page).whenComplete { res, err ->
+                VoidkitServer.get()?.execute {
+                    if (err != null) {
+                        cb(all, err.message)
+                        return@execute
+                    }
+                    // 查询按 id 从新到旧返回，直接顺序追加即为「倒序撤销」要的次序
+                    all += res.rows
+                    if (res.nextCursor != null && all.size < cap) {
+                        step(store, res.nextCursor)
+                    } else {
+                        cb(all.take(cap), null)
+                    }
+                }
+            }
+        }
+        val store = db
+        if (store == null) {
+            cb(emptyList(), "数据库未就绪")
+            return
+        }
+        step(store, null)
+    }
 
     // ---------- 查询参数解析 ----------
 
