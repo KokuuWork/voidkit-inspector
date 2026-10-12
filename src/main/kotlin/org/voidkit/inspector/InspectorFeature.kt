@@ -26,6 +26,7 @@ import net.neoforged.neoforge.event.entity.item.ItemTossEvent
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent
 import net.neoforged.neoforge.event.entity.player.ItemEntityPickupEvent
 import net.neoforged.neoforge.event.entity.player.PlayerContainerEvent
+import net.neoforged.neoforge.event.entity.player.PlayerEvent
 import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent
 import net.neoforged.neoforge.event.level.BlockEvent
 import net.neoforged.neoforge.event.level.ExplosionEvent
@@ -319,6 +320,21 @@ class InspectorFeature : Feature() {
         val player = e.entity as? ServerPlayer ?: return
         val open = openContainers.remove(player.uuid) ?: return
         diffContainer(player, e.container, open)
+    }
+
+    /**
+     * 玩家退出时清掉他的会话状态。
+     *
+     * 异常退出（崩溃 / 断线）可能不触发容器 Close 事件 —— 不清的话 openContainers
+     * 会一直持有整个容器快照（含全部格子的 ItemStack 副本，还强引用着 Container 本体，
+     * 阻止已卸载的方块实体被 GC），来过一个开过箱子的玩家就攒一份。
+     */
+    @SubscribeEvent
+    fun onLogout(e: PlayerEvent.PlayerLoggedOutEvent) {
+        val player = e.entity as? ServerPlayer ?: return
+        inspecting.remove(player.uuid)
+        openContainers.remove(player.uuid)
+        lookups.remove(player.uuid)
     }
 
     private fun snapshotContainer(player: ServerPlayer, menu: net.minecraft.world.inventory.AbstractContainerMenu): OpenContainer? {

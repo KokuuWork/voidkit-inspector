@@ -233,29 +233,35 @@ class InspectorDb(
         if (batch.isEmpty()) return
         writerConn.autoCommit = false
         try {
-            val ps = writerConn.prepareStatement(
+            writerConn.prepareStatement(
                 "INSERT INTO events(time,dim,x,y,z,actor,action,mat,amount,data,source) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
-            )
-            for (e in batch) {
-                ps.setLong(1, e.time)
-                ps.setInt(2, dimensionIdForWrite(e.world))
-                ps.setInt(3, e.x)
-                ps.setInt(4, e.y)
-                ps.setInt(5, e.z)
-                ps.setInt(6, actorIdForWrite(e.actorName, e.actorUuid, e.source.id))
-                ps.setInt(7, e.action)
-                ps.setInt(8, materialIdForWrite(e.material))
-                ps.setInt(9, e.amount)
-                if (e.nbt != null) ps.setBytes(10, e.nbt) else ps.setNull(10, Types.BLOB)
-                ps.setInt(11, e.source.id)
-                ps.addBatch()
+            ).use { ps ->
+                for (e in batch) {
+                    ps.setLong(1, e.time)
+                    ps.setInt(2, dimensionIdForWrite(e.world))
+                    ps.setInt(3, e.x)
+                    ps.setInt(4, e.y)
+                    ps.setInt(5, e.z)
+                    ps.setInt(6, actorIdForWrite(e.actorName, e.actorUuid, e.source.id))
+                    ps.setInt(7, e.action)
+                    ps.setInt(8, materialIdForWrite(e.material))
+                    ps.setInt(9, e.amount)
+                    if (e.nbt != null) ps.setBytes(10, e.nbt) else ps.setNull(10, Types.BLOB)
+                    ps.setInt(11, e.source.id)
+                    ps.addBatch()
+                }
+                ps.executeBatch()
             }
-            ps.executeBatch()
-            ps.close()
             writerConn.commit()
             written.addAndGet(batch.size.toLong())
         } catch (t: Throwable) {
             runCatching { writerConn.rollback() }
+            // 字典 INSERT 与主写入在同一个事务里，rollback 会把刚插的字典行也回滚掉，
+            // 但内存缓存已经记下了新 id —— 不清的话后续会引用不存在的字典行（悬空引用，
+            // 重启后查这些 id 的名字会变成 "?"）。代价是下次写入重新查一遍字典，一次性。
+            dimId.clear(); dimName.clear()
+            matId.clear(); matName.clear()
+            actorId.clear(); actorName.clear(); actorUuid.clear()
             LOG.error("审计写库失败，丢弃 {} 条", batch.size, t)
         } finally {
             runCatching { writerConn.autoCommit = true }
