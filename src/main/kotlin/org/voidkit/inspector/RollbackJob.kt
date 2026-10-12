@@ -13,6 +13,18 @@ import net.minecraft.world.level.block.entity.BlockEntity
 import net.minecraft.world.level.block.state.BlockState
 
 /**
+ * 分帧执行的世界改动任务的公共接口：回滚与它的撤销（undo）都按「每秒一批」推进，
+ * InspectorFeature 的 tickRollback 只认这个接口，不关心具体是回滚还是撤销。
+ */
+interface SteppedJob {
+    val isDone: Boolean
+    fun tick(server: MinecraftServer)
+
+    /** 取走完成报告（取一次就没了）。null = 还没跑完。 */
+    fun pollReport(): List<String>?
+}
+
+/**
  * 智能回滚执行器 —— issue #8 五层设计中的第 1 层（分类感知）v1 落地。
  *
  * ## 设计要点
@@ -27,7 +39,8 @@ import net.minecraft.world.level.block.state.BlockState
  *   绝不丢到地上（防复制 / 防卡实体）；机器一律先跳过；绝不自动封禁、绝不删除任何东西。
  *
  * v1 范围（Part of #8）：方块破坏 / 放置还原、原版容器 NBT 恢复、被拿取物品塞回。
- * 因果链聚类、整结构回滚、回滚的撤销（undo）留作后续部分。
+ * 因果链聚类、整结构回滚留作后续部分；回滚执行时逐 target 拍「回滚前快照」，
+ * 交给 [UndoJournal] 落库 —— 回滚的撤销（undo）见 [UndoJob]。
  */
 class RollbackJob private constructor(
     private val dim: String,
@@ -36,7 +49,7 @@ class RollbackJob private constructor(
     private val tasks: List<Task>,
     /** 构造期（分类阶段）被跳过的机器：material -> 次数。 */
     private val createMachineSkips: Map<String, Int>,
-) {
+) : SteppedJob {
 
     /** 单个回滚动作。构造期生成，主线程消费。 */
     private sealed interface Task
@@ -70,6 +83,9 @@ class RollbackJob private constructor(
     private var finished = false
     private var report: List<String>? = null
 
+    /** 回滚前快照（undo journal 的原料）：主线程应用任务时逐个记录。 */
+    private val undoActions = ArrayList<UndoAction>()
+
     // ---------------- 预览统计（构造期算好，线程安全只读） ----------------
 
     /** 分类计数，供 preview 命令展示。 */
@@ -102,12 +118,12 @@ class RollbackJob private constructor(
     // ---------------- 执行 ----------------
 
     /** 还有没有活可干。 */
-    val isDone: Boolean get() = finished
+    override val isDone: Boolean get() = finished
 
     /**
      * 每秒由 [InspectorFeature.onSecond] 调一次，在主线程上分批应用任务。
      */
-    fun tick(server: MinecraftServer) {
+    override fun tick(server: MinecraftServer) {
         if (finished) return
         val level = levelOf(server)
         if (level == null) {
@@ -123,10 +139,20 @@ class RollbackJob private constructor(
     }
 
     /** 取走完成报告（取一次就没了）。null = 还没跑完。 */
-    fun pollReport(): List<String>? {
+    override fun pollReport(): List<String>? {
         val r = report
         report = null
         return r
+    }
+
+    /**
+     * 取走本次回滚记录的「回滚前快照」（undo journal 的原料）。
+     * job 跑完（isDone）后由 InspectorFeature 调用一次，取走即清空。
+     */
+    fun drainUndoActions(): List<UndoAction> {
+        val list = ArrayList(undoActions)
+        undoActions.clear()
+        return list
     }
 
     // ---------------- 任务应用（主线程） ----------------
@@ -140,6 +166,8 @@ class RollbackJob private constructor(
                     errors++
                     return
                 }
+                // 动手前先拍快照：undo 要恢复到「回滚前」的样子（含空气）
+                undoActions.add(snapshotBlock(level, task.pos))
                 level.setBlock(task.pos, state, 3)
                 restoredBlocks++
                 val nbt = task.nbt
@@ -155,6 +183,7 @@ class RollbackJob private constructor(
             }
 
             is RemoveBlock -> {
+                undoActions.add(snapshotBlock(level, task.pos))
                 level.setBlock(task.pos, Blocks.AIR.defaultBlockState(), 3)
                 removedBlocks++
             }
@@ -179,10 +208,16 @@ class RollbackJob private constructor(
                 }
                 // diff 记录的 nbt 是当时整组物品的快照，count 可能大于实际拿走的数量，以 amount 为准
                 stack.count = task.amount.coerceAtLeast(1)
+                val toInsert = stack.count
                 val leftover = insertIntoContainer(be, stack)
                 if (leftover <= 0) {
                     itemsRestored++
+                    undoActions.add(UndoItemsInserted(task.pos.x, task.pos.y, task.pos.z, task.material, toInsert))
                 } else {
+                    if (leftover < toInsert) {
+                        // 只塞进去了一部分，也要按实际塞进去的数量记 journal
+                        undoActions.add(UndoItemsInserted(task.pos.x, task.pos.y, task.pos.z, task.material, toInsert - leftover))
+                    }
                     unrestoredItems.merge(task.material, leftover, Int::plus)
                 }
             }
@@ -250,6 +285,13 @@ class RollbackJob private constructor(
             if (l.dimension().location().toString() == dim) return l
         }
         return null
+    }
+
+    /** 拍下该位置回滚前的方块快照（空气也如实记），undo 据此恢复到「回滚前」。 */
+    private fun snapshotBlock(level: ServerLevel, pos: BlockPos): UndoBlockState {
+        val state = level.getBlockState(pos)
+        val material = if (state.isAir) "minecraft:air" else Nbt.blockId(state)
+        return UndoBlockState(pos.x, pos.y, pos.z, material, Nbt.blockEntityNbt(level, pos))
     }
 
     companion object {

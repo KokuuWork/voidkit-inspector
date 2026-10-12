@@ -162,6 +162,19 @@ class InspectorConfig {
     /** 预览的有效期（秒）。超时后必须重新 preview 才能执行 rollback，防止拿旧预览回滚新世界。 */
     var rollbackPreviewTtlSeconds: Int = 300
 
+    // ---------- 回滚撤销（issue #8 第 5 层） ----------
+
+    /** 回滚撤销（undo）总开关。关掉后 rollback --undo 直接拒绝。 */
+    var rollbackUndoEnabled: Boolean = true
+
+    /**
+     * 回滚撤销的时间窗（分钟）：只允许撤销该窗口内执行的回滚，默认 30 分钟。
+     *
+     * 间隔越久，回滚之后世界上发生的新改动越多，撤销越容易把别人的合法改动一并抹掉 ——
+     * 所以撤销窗口要比回滚时间窗紧得多。每个回滚只能撤销一次。
+     */
+    var rollbackUndoWindowMinutes: Int = 30
+
     // ---------- 因果链聚类（issue #8 第 3 层） ----------
 
     /**
@@ -205,6 +218,7 @@ class InspectorConfig {
             "immersiveengineering", "thermal",
         )
         if (rollbackPreviewTtlSeconds < 30) rollbackPreviewTtlSeconds = 300
+        if (rollbackUndoWindowMinutes < 1) rollbackUndoWindowMinutes = 30
         if (chainIdleMinutes < 1) chainIdleMinutes = 5
         if (chainRadiusBlocks < 1) chainRadiusBlocks = 32
     }
@@ -255,6 +269,9 @@ object InspectorComments {
         "rollbackMachineNamespaces" to "机器命名空间名单：这些模组的无 NBT 结构零件（线缆/传动件/管道）默认跳过不回滚。\n" +
             "带 NBT 的模组机器（Create/Mek/AE2 机器等）一律默认跳过，需 --include-machines 显式确认。",
         "rollbackPreviewTtlSeconds" to "预览有效期（秒）。超时后必须重新 preview 才能执行 rollback。",
+        "rollbackUndoEnabled" to "回滚撤销（undo）总开关。关掉后 rollback --undo 直接拒绝。",
+        "rollbackUndoWindowMinutes" to "回滚撤销时间窗（分钟）：只允许撤销该窗口内执行的回滚，每个回滚只能撤销一次。\n" +
+            "间隔越久，回滚后世界上的新改动越多，撤销越容易误伤合法改动，默认 30 分钟。",
         "chainIdleMinutes" to "因果链的时间断链阈值（分钟）：同一玩家相邻操作间隔超过即断成两条链。\n" +
             "/inspect chain 按它聚类，/inspect rollback chain:玩家:链id 整链回滚。",
         "chainRadiusBlocks" to "因果链的空间断链阈值（格）：新事件与链上最近事件距离超过即断链。",
