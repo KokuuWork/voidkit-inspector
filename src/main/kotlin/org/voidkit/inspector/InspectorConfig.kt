@@ -131,6 +131,37 @@ class InspectorConfig {
     /** 清理过期记录时，每批删除多少条（分批删避免长时间锁库）。 */
     var purgeBatchSize: Int = 5000
 
+    // ---------- 智能回滚（issue #8 第 1 层 v1） ----------
+
+    /** 回滚功能总开关。关掉后 preview / rollback 命令直接拒绝。 */
+    var rollbackEnabled: Boolean = true
+
+    /**
+     * 单次回滚最多处理的审计记录数。
+     *
+     * 这是回滚自己的防雪崩闸门：即便时间窗写得很宽，一次也只回滚这么多条，
+     * 超出的部分留着做下一轮。预览和执行用的是同一批数据，不会出现「预览一套、执行另一套」。
+     */
+    var maxRollbackEvents: Int = 10000
+
+    /** 单次回滚最大半径（格）。防止手滑把 r:2000 的全服回滚提交上去。 */
+    var maxRollbackRadius: Int = 50
+
+    /** 回滚执行速率：每秒最多应用多少个方块操作。分帧执行，大回滚不烧 TPS。 */
+    var rollbackBlocksPerSecond: Int = 2000
+
+    /**
+     * 「机器命名空间」名单：这些模组的无 NBT 方块（线缆、传动件、管道等结构零件）
+     * 默认跳过不回滚，避免拆断仍在运转的网络。带 NBT 的模组机器一律默认跳过，与此名单无关。
+     */
+    var rollbackMachineNamespaces: MutableList<String> = mutableListOf(
+        "create", "mekanism", "ae2", "appliedenergistics2",
+        "immersiveengineering", "thermal",
+    )
+
+    /** 预览的有效期（秒）。超时后必须重新 preview 才能执行 rollback，防止拿旧预览回滚新世界。 */
+    var rollbackPreviewTtlSeconds: Int = 300
+
     fun normalize() {
         // ⚠️ Gson 用 Unsafe 分配对象，缺字段会落成零值 —— 每加一个字段这里都要兜底
         if (databaseFile == null || databaseFile.isBlank()) databaseFile = "inspector/inspector.db"
@@ -150,6 +181,14 @@ class InspectorConfig {
         if (queryThreads < 1) queryThreads = 2
         if (queryThreads > 8) queryThreads = 8
         if (purgeBatchSize <= 0) purgeBatchSize = 5000
+        if (maxRollbackEvents < 100) maxRollbackEvents = 10000
+        if (maxRollbackRadius < 1) maxRollbackRadius = 50
+        if (rollbackBlocksPerSecond < 100) rollbackBlocksPerSecond = 2000
+        if (rollbackMachineNamespaces == null) rollbackMachineNamespaces = mutableListOf(
+            "create", "mekanism", "ae2", "appliedenergistics2",
+            "immersiveengineering", "thermal",
+        )
+        if (rollbackPreviewTtlSeconds < 30) rollbackPreviewTtlSeconds = 300
     }
 
     /** 统一小写 + 去空白后的集合，避免 `Minecraft:Diamond ` 这种写法漏判。 */
@@ -191,6 +230,13 @@ object InspectorComments {
         "flushIntervalMs" to "写线程最长攒批时间（毫秒）。队列不满也到点落库，控制延迟。",
         "queryThreads" to "查询线程池大小。查询在独立线程跑，不占游戏主线程、不卡 TPS。",
         "purgeBatchSize" to "清理过期记录时每批删除条数（分批删避免长时间锁库）。",
+        "rollbackEnabled" to "智能回滚功能总开关。关掉后 preview / rollback 命令直接拒绝。",
+        "maxRollbackEvents" to "单次回滚最多处理的审计记录数。预览与执行用同一批数据，防止一次回滚过大拖垮服务器。",
+        "maxRollbackRadius" to "单次回滚最大半径（格）。防手滑提交全服回滚。",
+        "rollbackBlocksPerSecond" to "回滚执行速率：每秒最多应用多少个方块操作（分帧防雪崩）。",
+        "rollbackMachineNamespaces" to "机器命名空间名单：这些模组的无 NBT 结构零件（线缆/传动件/管道）默认跳过不回滚。\n" +
+            "带 NBT 的模组机器（Create/Mek/AE2 机器等）一律默认跳过，需 --include-machines 显式确认。",
+        "rollbackPreviewTtlSeconds" to "预览有效期（秒）。超时后必须重新 preview 才能执行 rollback。",
     )
 }
 
