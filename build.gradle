@@ -43,12 +43,14 @@ dependencies {
     implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.1.0'
 
     // core 前置：编译期依赖（compileOnly），运行时由服主同装 voidkit_core。
+// ⚠️ 用 fileTree 通配而不是写死文件名 —— core 的版本号与命名规格会变，
+//    写死会导致「fetch-core.sh 下到了，但编译期看不到 core」这种难查的问题。
     // Kotlin 运行时也由 core jar 携带（core 是唯一 jarJar kotlin 的），这里不重复 jarJar。
-    compileOnly files('libs/voidkit_core-1.2.0.jar')
+    compileOnly fileTree(dir: 'libs', include: ['voidkit_core-*.jar'])
 
     // 单元测试（ChainCluster 聚类逻辑是纯数据计算，不需要起 MC 服务端）。
     // core 是 compileOnly，不进 test classpath —— 这里补一份，保证测试编译符号完整。
-    testImplementation files('libs/voidkit_core-1.2.0.jar')
+    testImplementation fileTree(dir: 'libs', include: ['voidkit_core-*.jar'])
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
@@ -68,7 +70,7 @@ afterEvaluate {
     dependencies {
         additionalRuntimeClasspath 'org.jetbrains.kotlin:kotlin-stdlib:2.1.0'
         additionalRuntimeClasspath 'org.xerial:sqlite-jdbc:3.53.4.0'
-        additionalRuntimeClasspath files('libs/voidkit_core-1.2.0.jar')
+        additionalRuntimeClasspath fileTree(dir: 'libs', include: ['voidkit_core-*.jar'])
     }
 }
 

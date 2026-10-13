@@ -73,6 +73,18 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class InspectorFeature : Feature() {
 
+    companion object {
+        /** 查询类权限：模式开关 / here / lookup / page / chain / status —— 给版主。 */
+        const val NODE_VIEW = "voidkit.inspector"
+
+        /** 回滚（preview / rollback）—— 会**改世界**，单独一个节点。 */
+        const val NODE_ROLLBACK = "voidkit.inspector.rollback"
+
+        /** 清理历史（purge）—— 会**删数据**，单独一个节点。 */
+        const val NODE_PURGE = "voidkit.inspector.purge"
+    }
+
+
     override val id = "inspector"
     override val displayName = "操作审计"
     override val description = "方块/容器/实体操作审计：检查模式 + 查询，SQLite 存储"
@@ -629,16 +641,34 @@ class InspectorFeature : Feature() {
     // ---------- 命令 ----------
 
     override fun registerCommands(dispatcher: CommandDispatcher<CommandSourceStack>) {
-        registerInspectorCommand(dispatcher, "inspect")
-        registerInspectorCommand(dispatcher, "coi")
-        registerInspectorCommand(dispatcher, "ins")
+        // 三个别名各自容错：整合包里撞名只跳过这一个，不连累另外两个
+        guarded("inspect") { registerInspectorCommand(dispatcher, "inspect") }
+        guarded("coi") { registerInspectorCommand(dispatcher, "coi") }
+        guarded("ins") { registerInspectorCommand(dispatcher, "ins") }
+    }
+
+    /**
+     * 单条命令注册的容错包装。
+     *
+     * 内核（PluginRegistry）只按**模块**容错 —— 这里若抛异常，
+     * 同一模块后面的命令会一起注册不上。整合包里同名命令很常见，必须逐条隔离。
+     */
+    private inline fun guarded(name: String, block: () -> Unit) {
+        runCatching(block).onFailure {
+            VoidkitCore.LOG.warn("[CMD] /{} 注册失败，已跳过：{}", name, it.message)
+        }
     }
 
     private fun registerInspectorCommand(dispatcher: CommandDispatcher<CommandSourceStack>, name: String) {
-        val perm = { s: CommandSourceStack -> VoidkitServices.permission().has(s, "voidkit.inspector") }
+        // 查询类权限：给版主就能查，但**不动数据、不改世界**
+        val view = { s: CommandSourceStack -> VoidkitServices.permission().has(s, NODE_VIEW) }
+        // 回滚会改世界
+        val rollback = { s: CommandSourceStack -> VoidkitServices.permission().has(s, NODE_ROLLBACK) }
+        // 清库会删历史记录
+        val purge = { s: CommandSourceStack -> VoidkitServices.permission().has(s, NODE_PURGE) }
         dispatcher.register(
             Commands.literal(name)
-                .requires(perm)
+                .requires(view)
                 .executes { toggle(it.source) }
                 .then(Commands.literal("on").executes { setMode(it.source, true) })
                 .then(Commands.literal("off").executes { setMode(it.source, false) })
@@ -652,16 +682,19 @@ class InspectorFeature : Feature() {
                 .then(Commands.literal("status").executes { status(it.source) })
                 .then(
                     Commands.literal("purge")
+                        .requires(purge)
                         .then(Commands.argument("days", IntegerArgumentType.integer(1))
                             .executes { purge(it.source, IntegerArgumentType.getInteger(it, "days")) })
                 )
                 .then(
                     Commands.literal("preview")
+                        .requires(rollback)
                         .then(Commands.argument("filters", StringArgumentType.greedyString())
                             .executes { previewRollback(it.source, StringArgumentType.getString(it, "filters")) })
                 )
                 .then(
                     Commands.literal("rollback")
+                        .requires(rollback)
                         .then(Commands.argument("filters", StringArgumentType.greedyString())
                             .executes { rollback(it.source, StringArgumentType.getString(it, "filters")) })
                 )

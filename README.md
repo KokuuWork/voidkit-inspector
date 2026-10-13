@@ -57,6 +57,23 @@ Voidkit 套件的**操作审计**模组 —— CoreProtect 风格的方块 / 容
 查询参数：`u:` 玩家、`r:` 半径、`t:` 时间（`1h`/`1d`）、`a:` 动作（`place`/`break`/`open`/`kill`）、
 `b:` 方块/物品 id。
 
+## 权限
+
+命令分**查询**与**改数据**两类，节点分开 —— 给版主「查」的权限，不等于让他能回滚世界或清库。
+
+| 节点 | 覆盖的命令 | 说明 |
+|---|---|---|
+| `voidkit.inspector` | `/inspect` `/inspect on\|off` `/inspect here` `/inspect lookup` `/inspect page` `/inspect chain` `/inspect status` | **只读**：查看历史 |
+| `voidkit.inspector.rollback` | `/inspect preview` `/inspect rollback` | 会**改世界**（回滚） |
+| `voidkit.inspector.purge` | `/inspect purge <天>` | 会**删历史数据** |
+
+- 三个命令名等价：`/inspect`（别名 `/coi` `/ins`）。
+- 没装 `voidkit_perm` 时按原版 OP 判定（**只有 OP 能用**，普通玩家一律拒绝）。
+- ⚠️ **升级注意**：本次之前所有子命令都只由 `voidkit.inspector` 把守。
+  如果你的服依赖「有 `voidkit.inspector` 就能回滚」，升级后需要额外授予
+  `voidkit.inspector.rollback` / `voidkit.inspector.purge`。
+  这是刻意的：**查看历史**与**改写世界**不该是同一个权限。
+
 ## 架构
 
 插件只依赖 core 的 `org.voidkit.core.api` 契约，并通过 `core.platform` 适配层
