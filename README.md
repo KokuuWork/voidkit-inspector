@@ -22,15 +22,21 @@ ME 网络照样瘫。所以回滚做了五层设计（见下文），核心原�
 
 ## 支持矩阵与分支对应
 
-| Minecraft | 加载器 | 分支 | jar |
-|---|---|---|---|
-| 1.21.1 | NeoForge 21.1.x | `main` | `voidkit_inspector-<版本>-mc1.21.1-neoforge.jar` |
-| 1.21.1 | Forge 52.1.x | `mc/1.21.1-forge` | `voidkit_inspector-<版本>-mc1.21.1-forge.jar` |
-| 1.20.1 | Forge 47.4.x | `mc/1.20.1` | `voidkit_inspector-<版本>-mc1.20.1-forge.jar` |
+| Minecraft | 加载器 | 分支 | jar | 真机验证 |
+|---|---|---|---|---|
+| 1.21.1 | NeoForge 21.1.x | `main` | `voidkit_inspector-<版本>+mc1.21.1-neoforge.jar` | ✅ |
+| 1.21.1 | Forge 52.1.x | `mc/1.21.1-forge` | `voidkit_inspector-<版本>+mc1.21.1-forge.jar` | ✅ |
+| 1.20.1 | Forge 47.4.x | `mc/1.20.1` | `voidkit_inspector-<版本>+mc1.20.1-forge.jar` | — |
 
 - **本分支 `main` 对应 1.21.1 + NeoForge**；其它版本线见上表。
 - 所有版本线的 jar 挂在**同一个 release** 下，按文件名后缀区分，勿混用。
-- Inspector jar 必须与 `voidkit_core` **同版本线**（`mods.toml` 有强制依赖检查）。
+- Inspector jar 必须与 `voidkit_core` **同版本线**（`mods.toml` 有强制依赖检查），
+  且 **core 的加载器也要一致**（core 的 jar 内含加载器 API，NeoForge 版与 Forge 版
+  不能互相顶替）。
+
+> ⚠️ **1.20.1 线的 jar 必须配 1.20.1 版的 core**，不能拿 1.21.1 的凑 ——
+> 依赖区间匹配不上时加载器**不报错、直接跳过整个 mod**，服务端照常启动，
+> 只是没这个审计模块，非常难发现。
 
 ---
 
