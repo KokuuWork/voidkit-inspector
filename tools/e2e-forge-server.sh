@@ -48,13 +48,21 @@ if [ ! -d "$SERVER_ABS" ]; then
   exit 2
 fi
 
-# Forge 1.21.1 的启动参数文件（不是 NeoForge 的 win_args.txt）
-ARGS="$SERVER_ABS/libraries/net/minecraftforge/forge/1.21.1-52.1.19/unix_args.txt"
+# Forge 1.21.1 的启动参数文件（不是 NeoForge 那种单一 win_args.txt）
+#
+# ⚠️ **必须优先 win_args.txt**：本脚本只在 Windows 上跑（本机没 WSL），
+#    而 `unix_args.txt` 里的 classpath 用 `:` 分隔，Windows 的 java 认 `;`，
+#    拿 unix_args 启动会在 boot layer 就炸：
+#      `java.nio.file.InvalidPathException: Illegal char <:> at index 70: ...`
+#    —— 服务端**根本没起来**，但错误发生在 mod 加载之前，
+#    很容易误判成「模组有问题」。两个文件都存在时一律选 win。
+FORGE_DIR="$SERVER_ABS/libraries/net/minecraftforge/forge/1.21.1-52.1.19"
+ARGS="$FORGE_DIR/win_args.txt"
 if [ ! -f "$ARGS" ]; then
-  ARGS="$SERVER_ABS/libraries/net/minecraftforge/forge/1.21.1-52.1.19/win_args.txt"
+  ARGS="$FORGE_DIR/unix_args.txt"
 fi
 if [ ! -f "$ARGS" ]; then
-  echo "[e2e] 找不到 Forge 启动参数：$SERVER_ABS/libraries/net/minecraftforge/forge/1.21.1-52.1.19/*_args.txt（服务端没装好？）" >&2
+  echo "[e2e] 找不到 Forge 启动参数：$FORGE_DIR/*_args.txt（服务端没装好？）" >&2
   exit 2
 fi
 
