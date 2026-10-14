@@ -23,9 +23,12 @@ PROJECT="$(pwd)"
 SERVER_DIR="${SERVER_DIR:-$PROJECT/build/e2e-forge-1211}"
 LOG="$SERVER_DIR/server.log"
 
+# ⚠️ 绝对路径判定要同时认 POSIX（/xxx）与 Windows 盘符（C:/xxx）——
+#    Git Bash 下 SERVER_DIR 两种形态都可能出现，只判 `/` 会把盘符路径
+#    拼成「$PROJECT/C:/...」然后报「目录不存在」。
 case "$SERVER_DIR" in
-  /*) SERVER_ABS="$SERVER_DIR" ;;
-  *)  SERVER_ABS="$PROJECT/$SERVER_DIR" ;;
+  /*|[A-Za-z]:/*|[A-Za-z]:\\*) SERVER_ABS="$SERVER_DIR" ;;
+  *)                        SERVER_ABS="$PROJECT/$SERVER_DIR" ;;
 esac
 
 # 1.21.1 必须 JDK 21
@@ -140,36 +143,33 @@ fi
 #    `VoidkitInspector <版本> (voidkit_inspector)`，Forge 没有），
 #    所以不能照抄 guard 的 NeoForge 判据 —— 那样会永远假失败。
 #
-# 用两条**只能由 inspector 真的跑起来**才会出现的日志：
-#   1. core 在注册命令时报告 active 模块含 `inspector`
-#   2. InspectorFeature 启动时打印「审计数据库就绪」
-# 反面情形（mods.toml 写错被静默跳过）这两条都不会出现 ——
-# 实测踩过：Skip 发生时只有 core 的日志，Done 照样出现，最容易误判成通过。
-if ! grep -qaE '注册命令，active 模块 = \[[^]]*inspector' "$LOG" 2>/dev/null; then
-  echo "[e2e] ❌ core 的 active 模块里没有 inspector（mod 被加载器跳过？）" >&2
-  CRASH=1
-else
-  echo "[e2e] ✅ core 已把 inspector 识别为已注册模块"
-fi
-
-if ! grep -qa '审计数据库就绪' "$LOG" 2>/dev/null; then
-  echo "[e2e] ❌ 日志里没有「审计数据库就绪」（InspectorFeature 没跑到建库？）" >&2
-  CRASH=1
-else
-  echo "[e2e] ✅ 审计数据库已就绪（jarJar 的 SQLite 原生库可用）"
-fi
-
-# 事件桥是否注册（间接证明：模块已启用 + 命令已注册）
+# ⚠️ **判据一律只用 ASCII 锚点**：服务端日志的中文编码不固定
+#    （同版本下 GBK / UTF-8 都见过），grep 中文会随机匹配不上。
+#    用 core 的模块计数 `voidkit_inspector(1)` + 审计库文件实证。
+#
+# 反面情形实测踩过两次：
+#   - mods.toml 写错 → mod 被**静默跳过**，Done 照样出现，只有 core 的日志
+#   - mod 进 ERROR 状态 → 模组清单里**照样出现**它（清单只是发现阶段结果）
 if grep -qaE 'voidkit_inspector\(1\)' "$LOG" 2>/dev/null; then
-  echo "[e2e] ✅ 模块统计里 voidkit_inspector 计数为 1"
+  echo "[e2e] ✅ core 的模块统计里 voidkit_inspector 计数为 1（模块已启用）"
+else
+  echo "[e2e] ❌ core 的模块统计里没有 voidkit_inspector（mod 被跳过或加载失败？）" >&2
+  CRASH=1
 fi
 
-# 功能判据：inspector 启动时应落配置 + 建 SQLite 库
-if [ ! -d "$SERVER_ABS/voidkit/inspector" ]; then
-  echo "[e2e] ❌ 未生成 voidkit/inspector 数据目录（配置/库未落盘，模块没起来？）" >&2
+# 审计库实证：文件存在 + WAL 有实际写入（不是空壳）
+DB="$SERVER_ABS/voidkit/inspector/inspector.db"
+if [ ! -f "$DB" ]; then
+  echo "[e2e] ❌ 未生成 inspector.db（InspectorFeature 没跑到建库？）" >&2
   CRASH=1
 else
-  echo "[e2e] ✅ voidkit/inspector 数据目录已生成"
+  WAL="$DB-wal"
+  WALSZ=$(wc -c < "$WAL" 2>/dev/null || echo 0)
+  if [ "$WALSZ" -gt 0 ] 2>/dev/null; then
+    echo "[e2e] ✅ 审计库已建且有写入（db + ${WALSZ}B WAL，jarJar 的 SQLite 原生库可用）"
+  else
+    echo "[e2e] ⚠️ inspector.db 存在但 WAL 为空（建库了，但没有记录写入）"
+  fi
   ls -la "$SERVER_ABS/voidkit/inspector" | sed 's/^/[e2e]   /'
 fi
 
