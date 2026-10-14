@@ -15,9 +15,17 @@ plugins {
 // ==============================================================
 
 group = 'org.voidkit'
-version = '1.2.0'
+// 与 voidkit 套件其余模块同一规格：<mod>-0.1.0-beta.1+mc<版本>-<加载器>.jar
+version = '0.1.0-beta.1'
 
 base { archivesName = 'voidkit_inspector' }
+
+ext {
+    mcVersion = '1.21.1'
+    // voidkit_core 的版本 —— **独立于本插件版本**（两个插件各自发版，节奏不同）。
+    // 拿本插件版本去写 core 的依赖区间是最隐蔽的坑：区间不匹配 → mod 被静默跳过。
+    coreVersion = '0.1.0-beta.1'
+}
 
 java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 kotlin { jvmToolchain(21) }
@@ -92,12 +100,19 @@ processResources {
         neo_range   : '[21.1.0,21.2.0)',
         mc_range    : '[1.21.1,1.22)',
         loader_range: '[4,)',
+        // ⚠️ voidkit_core 的版本区间**不能用 mod_version**。
+        // 早前写死成 "[${mod_version},)" 而 mod_version 是本插件自己的版本，
+        // 与 core 实际版本不同 → 区间永不匹配 → 依赖判定失败 →
+        // **整个 mod 被加载器静默跳过**（服务端照常 Done，只是没这个 mod）。
+        core_range  : "[${coreVersion},)",
     ]
     inputs.properties props
     filesMatching(['META-INF/neoforge.mods.toml']) { expand props }
 }
 
 jar {
+    // 产物命名规格与套件对齐：<mod>-<version>+mc<mc>-<loader>.jar
+    archiveFileName = "voidkit_inspector-${version}+mc${mcVersion}-neoforge.jar"
     manifest {
         attributes([
             'Specification-Title'   : 'voidkit_inspector',

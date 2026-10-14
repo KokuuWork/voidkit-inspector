@@ -3,6 +3,7 @@ package org.voidkit.inspector.platform.neoforge
 import net.neoforged.bus.api.IEventBus
 import net.neoforged.fml.ModContainer
 import net.neoforged.fml.common.Mod
+import net.neoforged.neoforge.common.NeoForge
 import net.neoforged.neoforge.event.server.ServerAboutToStartEvent
 import org.voidkit.core.api.ConfigSnapshots
 import org.voidkit.core.core.PluginRegistry
@@ -41,7 +42,13 @@ class VoidkitInspectorNeoForge(bus: IEventBus, container: ModContainer) {
         }
 
         // 配置在服务端启动阶段读 —— 构造期保持零 IO
-        bus.addListener { _: ServerAboutToStartEvent ->
+        //
+        // ⚠️ `ServerAboutToStartEvent` 是**游戏总线**事件，必须挂 `NeoForge.EVENT_BUS`。
+        //    挂到构造器注入的 mod 总线上会抛（E2E 实测，mod 进 ERROR、Done 永不出现）：
+        //    `IllegalArgumentException: Listener for event class
+        //     ...ServerAboutToStartEvent takes an argument that is not valid for this bus`
+        //    —— NeoForge 的 mod 总线**不转发**游戏事件，与直觉相反。
+        NeoForge.EVENT_BUS.addListener { _: ServerAboutToStartEvent ->
             org.voidkit.inspector.InspectorStore.load()
         }
     }
