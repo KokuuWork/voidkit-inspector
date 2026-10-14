@@ -11,25 +11,15 @@ import net.minecraft.server.MinecraftServer
 import net.minecraft.server.level.ServerLevel
 import net.minecraft.server.level.ServerPlayer
 import net.minecraft.world.Container
-import net.minecraft.world.entity.monster.Creeper
-import net.minecraft.world.entity.item.PrimedTnt
-import net.minecraft.world.entity.vehicle.MinecartTNT
-import net.minecraft.world.entity.boss.wither.WitherBoss
-import net.minecraft.world.entity.projectile.Fireball
+import net.minecraft.world.entity.Entity
+import net.minecraft.world.entity.item.ItemEntity
+import net.minecraft.world.entity.player.Player
+import net.minecraft.world.inventory.AbstractContainerMenu
+import net.minecraft.world.level.block.state.BlockState
 import net.minecraft.world.item.ItemStack
-import net.minecraft.world.level.Explosion
 import net.minecraft.world.level.Level
 import net.minecraft.world.level.block.entity.BlockEntity
 import net.minecraft.world.phys.BlockHitResult
-import net.neoforged.bus.api.SubscribeEvent
-import net.neoforged.neoforge.event.entity.item.ItemTossEvent
-import net.neoforged.neoforge.event.entity.living.LivingDeathEvent
-import net.neoforged.neoforge.event.entity.player.ItemEntityPickupEvent
-import net.neoforged.neoforge.event.entity.player.PlayerContainerEvent
-import net.neoforged.neoforge.event.entity.player.PlayerEvent
-import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent
-import net.neoforged.neoforge.event.level.BlockEvent
-import net.neoforged.neoforge.event.level.ExplosionEvent
 import org.voidkit.core.VoidkitCore
 import org.voidkit.core.api.ApiJson
 import org.voidkit.core.api.ApiRouter
@@ -288,13 +278,14 @@ class InspectorFeature : Feature() {
 
     // ---------- 方块事件 ----------
 
-    @SubscribeEvent
-    fun onBlockBreak(e: BlockEvent.BreakEvent) {
+    /**
+     * 玩家/自动化破坏方块。**加载器无关** —— 平台层（`platform/<loader>/InspectorEvents.kt`）
+     * 只负责把事件解包成这几个纯 MC 参数，判定与落库全在这里。
+     */
+    fun onBlockBreak(level: ServerLevel, pos: BlockPos, state: BlockState, player: Player?) {
         if (!enabled || !InspectorStore.config.logBlockBreak) return
-        val level = e.level as? ServerLevel ?: return
         if (dimBlacklisted(level)) return
 
-        val player = e.player
         val kind = Source.kindOfPlayer(player)
         val actor: String
         val uuid: String?
@@ -306,30 +297,33 @@ class InspectorFeature : Feature() {
             }
             SourceKind.AUTOMATION -> {
                 if (!InspectorStore.config.logAutomation) return
-                actor = Source.automationName(level, e.pos)
+                actor = Source.automationName(level, pos)
                 uuid = null
             }
             else -> return
         }
 
-        val material = Nbt.blockId(e.state)
+        val material = Nbt.blockId(state)
         if (material in InspectorStore.blockBlacklist) return
         if (!admit(actor)) return
 
         // 破坏发生在方块实体被移除之前，此时还能读到它的内容（箱子里有什么）
         enqueue(
-            LogEvent(now(), dim(level), e.pos.x, e.pos.y, e.pos.z, actor, uuid, kind,
-                Actions.BREAK, material, 1, Nbt.blockEntityNbt(level, e.pos))
+            LogEvent(now(), dim(level), pos.x, pos.y, pos.z, actor, uuid, kind,
+                Actions.BREAK, material, 1, Nbt.blockEntityNbt(level, pos))
         )
     }
 
-    @SubscribeEvent
-    fun onBlockPlace(e: BlockEvent.EntityPlaceEvent) {
+    /** 放置方块（玩家放置 / 末影人搬 / 自然生成）。加载器无关，参数由平台层解包。 */
+    fun onBlockPlace(
+        level: ServerLevel,
+        pos: BlockPos,
+        placedBlock: BlockState,
+        entity: Entity?,
+    ) {
         if (!enabled || !InspectorStore.config.logBlockPlace) return
-        val level = e.level as? ServerLevel ?: return
         if (dimBlacklisted(level)) return
 
-        val entity = e.entity
         val kind = Source.kindOfEntity(entity)
         val actor: String
         val uuid: String?
@@ -342,7 +336,7 @@ class InspectorFeature : Feature() {
             }
             SourceKind.AUTOMATION -> {
                 if (!InspectorStore.config.logAutomation) return
-                actor = Source.automationName(level, e.pos)
+                actor = Source.automationName(level, pos)
                 uuid = null
             }
             SourceKind.NATURAL -> {
@@ -354,7 +348,7 @@ class InspectorFeature : Feature() {
             else -> return
         }
 
-        val material = Nbt.blockId(e.placedBlock)
+        val material = Nbt.blockId(placedBlock)
         if (material in InspectorStore.blockBlacklist) return
         if (!admit(actor)) return
 
@@ -365,25 +359,24 @@ class InspectorFeature : Feature() {
         ) Actions.PLACE_FIRE else Actions.PLACE
 
         enqueue(
-            LogEvent(now(), dim(level), e.pos.x, e.pos.y, e.pos.z, actor, uuid, kind,
-                action, material, 1, Nbt.blockEntityNbt(level, e.pos))
+            LogEvent(now(), dim(level), pos.x, pos.y, pos.z, actor, uuid, kind,
+                action, material, 1, Nbt.blockEntityNbt(level, pos))
         )
     }
 
     // ---------- 爆炸（苦力怕 / TNT 的「该记」） ----------
 
-    @SubscribeEvent
-    fun onExplosion(e: ExplosionEvent.Detonate) {
+    /** 爆炸（苦力怕 / TNT / 凋灵 / 恶魂）。加载器无关：来源名由平台层判好传进来。 */
+    fun onExplosion(level: ServerLevel, affectedBlocks: List<BlockPos>, sourceName: String) {
         if (!enabled) return
-        val level = e.level as? ServerLevel ?: return
         if (dimBlacklisted(level)) return
 
-        val name = explosionName(e.explosion)
+        val name = sourceName
         // 只记可识别的敌对爆炸来源（默认 #creeper #tnt #wither #ghast）
         if (name !in InspectorStore.alwaysLog) return
 
         var logged = 0
-        for (pos in e.affectedBlocks) {
+        for (pos in affectedBlocks) {
             val state = level.getBlockState(pos)
             if (state.isAir) continue
             val material = Nbt.blockId(state)
@@ -397,18 +390,6 @@ class InspectorFeature : Feature() {
         }
     }
 
-    private fun explosionName(explosion: Explosion): String {
-        val direct = explosion.directSourceEntity
-        val indirect = explosion.indirectSourceEntity
-        return when {
-            direct is Creeper || indirect is Creeper -> "#creeper"
-            direct is MinecartTNT || direct is PrimedTnt -> "#tnt"
-            direct is WitherBoss || indirect is WitherBoss -> "#wither"
-            direct is Fireball -> "#ghast"
-            else -> "#explosion"
-        }
-    }
-
     // ---------- 容器拿取 / 放入 ----------
 
     private class OpenContainer(
@@ -417,20 +398,18 @@ class InspectorFeature : Feature() {
         val before: MutableMap<Pair<Container, Int>, ItemStack>,
     )
 
-    @SubscribeEvent
-    fun onContainerOpen(e: PlayerContainerEvent.Open) {
+    /** 容器打开：拍全槽位快照，关闭时 diff 出拿取 / 放入。加载器无关。 */
+    fun onContainerOpen(player: ServerPlayer, menu: AbstractContainerMenu) {
         if (!enabled || !InspectorStore.config.logContainers) return
-        val player = e.entity as? ServerPlayer ?: return
         if (Source.kindOfPlayer(player) != SourceKind.PLAYER) return
-        snapshotContainer(player, e.container)?.let { openContainers[player.uuid] = it }
+        snapshotContainer(player, menu)?.let { openContainers[player.uuid] = it }
     }
 
-    @SubscribeEvent
-    fun onContainerClose(e: PlayerContainerEvent.Close) {
+    /** 容器关闭：与开时快照 diff。加载器无关。 */
+    fun onContainerClose(player: ServerPlayer, menu: AbstractContainerMenu) {
         if (!enabled || !InspectorStore.config.logContainers) return
-        val player = e.entity as? ServerPlayer ?: return
         val open = openContainers.remove(player.uuid) ?: return
-        diffContainer(player, e.container, open)
+        diffContainer(player, menu, open)
     }
 
     /**
@@ -440,16 +419,15 @@ class InspectorFeature : Feature() {
      * 会一直持有整个容器快照（含全部格子的 ItemStack 副本，还强引用着 Container 本体，
      * 阻止已卸载的方块实体被 GC），来过一个开过箱子的玩家就攒一份。
      */
-    @SubscribeEvent
-    fun onLogout(e: PlayerEvent.PlayerLoggedOutEvent) {
-        val player = e.entity as? ServerPlayer ?: return
+    /** 玩家退出：清会话状态（加载器无关）。 */
+    fun onLogout(player: ServerPlayer) {
         inspecting.remove(player.uuid)
         openContainers.remove(player.uuid)
         lookups.remove(player.uuid)
         pendingRollback.remove(player.uuid)
     }
 
-    private fun snapshotContainer(player: ServerPlayer, menu: net.minecraft.world.inventory.AbstractContainerMenu): OpenContainer? {
+    private fun snapshotContainer(player: ServerPlayer, menu: AbstractContainerMenu): OpenContainer? {
         var pos: BlockPos? = null
         val before = HashMap<Pair<Container, Int>, ItemStack>()
         for (slot in menu.slots) {
@@ -462,7 +440,7 @@ class InspectorFeature : Feature() {
         return OpenContainer(dim(player.level()), pos, before)
     }
 
-    private fun diffContainer(player: ServerPlayer, menu: net.minecraft.world.inventory.AbstractContainerMenu, open: OpenContainer) {
+    private fun diffContainer(player: ServerPlayer, menu: AbstractContainerMenu, open: OpenContainer) {
         if (dimBlacklisted(player.level())) return
         val now = HashMap<Pair<Container, Int>, ItemStack>()
         for (slot in menu.slots) {
@@ -511,18 +489,17 @@ class InspectorFeature : Feature() {
 
     // ---------- 击杀 ----------
 
-    @SubscribeEvent
-    fun onDeath(e: LivingDeathEvent) {
+    /** 击杀实体。加载器无关：受害者与击杀者由平台层从事件解包。 */
+    fun onDeath(victim: Entity, killer: ServerPlayer) {
         if (!enabled || !InspectorStore.config.logKills) return
-        val level = e.entity.level() as? ServerLevel ?: return
+        val level = victim.level() as? ServerLevel ?: return
         if (dimBlacklisted(level)) return
-        val killer = e.source.entity as? ServerPlayer ?: return
         if (Source.kindOfPlayer(killer) != SourceKind.PLAYER) return
 
         val actor = Source.playerName(killer)
         if (!admit(actor)) return
-        val victimId = BuiltInRegistries.ENTITY_TYPE.getKey(e.entity.type)?.toString() ?: "unknown"
-        val p = e.entity.blockPosition()
+        val victimId = BuiltInRegistries.ENTITY_TYPE.getKey(victim.type)?.toString() ?: "unknown"
+        val p = victim.blockPosition()
         enqueue(
             LogEvent(now(), dim(level), p.x, p.y, p.z, actor, Source.playerUuid(killer),
                 SourceKind.PLAYER, Actions.KILL, victimId, 1, null)
@@ -531,14 +508,13 @@ class InspectorFeature : Feature() {
 
     // ---------- 丢 / 捡（默认关） ----------
 
-    @SubscribeEvent
-    fun onToss(e: ItemTossEvent) {
+    /** 玩家丢出物品（默认关）。加载器无关。 */
+    fun onToss(player: Player, itemEntity: ItemEntity) {
         if (!enabled || !InspectorStore.config.logItemDropPickup) return
-        val player = e.player
         if (Source.kindOfPlayer(player) != SourceKind.PLAYER) return
         val level = player.level() as? ServerLevel ?: return
         if (dimBlacklisted(level)) return
-        val stack = e.entity.item
+        val stack = itemEntity.item
         val material = Nbt.itemId(stack)
         if (material in InspectorStore.itemBlacklist) return
         val actor = Source.playerName(player)
@@ -550,14 +526,13 @@ class InspectorFeature : Feature() {
         )
     }
 
-    @SubscribeEvent
-    fun onPickup(e: ItemEntityPickupEvent.Pre) {
+    /** 玩家捡起物品（默认关）。加载器无关。 */
+    fun onPickup(player: Player, itemEntity: ItemEntity) {
         if (!enabled || !InspectorStore.config.logItemDropPickup) return
-        val player = e.player
         if (Source.kindOfPlayer(player) != SourceKind.PLAYER) return
         val level = player.level() as? ServerLevel ?: return
         if (dimBlacklisted(level)) return
-        val stack = e.itemEntity.item
+        val stack = itemEntity.item
         val material = Nbt.itemId(stack)
         if (material in InspectorStore.itemBlacklist) return
         val actor = Source.playerName(player)
@@ -571,20 +546,16 @@ class InspectorFeature : Feature() {
 
     // ---------- 检查模式 ----------
 
-    @SubscribeEvent
-    fun onLeftClick(e: PlayerInteractEvent.LeftClickBlock) {
-        val player = e.entity as? ServerPlayer ?: return
-        if (player.uuid !in inspecting) return
-        e.isCanceled = true
-        inspectBlock(player, e.pos)
-    }
-
-    @SubscribeEvent
-    fun onRightClick(e: PlayerInteractEvent.RightClickBlock) {
-        val player = e.entity as? ServerPlayer ?: return
-        if (player.uuid !in inspecting) return
-        e.isCanceled = true
-        inspectBlock(player, e.pos)
+    /**
+     * 检查模式的方块点击。**加载器无关**。
+     *
+     * @return true = 该玩家的方块交互已被审计吃掉（平台层应 `setCanceled(true)`），
+     *         false = 不在检查模式，平台层不要干预。
+     */
+    fun onInspectClick(player: ServerPlayer, pos: BlockPos): Boolean {
+        if (player.uuid !in inspecting) return false
+        inspectBlock(player, pos)
+        return true
     }
 
     private fun inspectBlock(player: ServerPlayer, pos: BlockPos) {
