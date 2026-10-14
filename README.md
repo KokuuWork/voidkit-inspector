@@ -6,6 +6,23 @@ Voidkit 套件的**操作审计**模组 —— CoreProtect 风格的方块 / 容
 > 从 Voidkit 套件独立发布，但仍依赖 `voidkit_core` 作为前置模组。
 > 纯服务端模组，无客户端 jar。
 
+## 下载
+
+**三条版本线挂在同一个 release 下，按文件名后缀区分** —— 下载前先看清自己的环境：
+
+| Minecraft | 加载器 | 文件 |
+|---|---|---|
+| 1.21.1 | NeoForge 21.1.x | `voidkit_inspector-0.1.0-beta.1+mc1.21.1-neoforge.jar` |
+| 1.21.1 | Forge 52.1.x | `voidkit_inspector-0.1.0-beta.1+mc1.21.1-forge.jar` |
+| 1.20.1 | Forge 47.4.x | `voidkit_inspector-0.1.0-beta.1+mc1.20.1-forge.jar` |
+
+→ [`KokuuWork/voidkit-inspector` Releases](https://github.com/KokuuWork/voidkit-inspector/releases)
+
+> ⚠️ **必须同时安装 `voidkit_core`，且 core 的版本线要与本 jar 一致。**
+> 缺 core 时 mod 会被加载器**静默跳过** —— 服务端照常启动，只是没有审计，
+> 非常难发现。core 从 `KokuuWork/voidkit` 的 release 下载对应的那一个
+> （NeoForge 版与 Forge 版的 jar 内含不同加载器 API，不能互相顶替）。
+
 ## 为什么是它
 
 普通查插件在科技包里会翻车：一条自动化产线刷几百万圆石、产几万铁锭，全记进数据库，
