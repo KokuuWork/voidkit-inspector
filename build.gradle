@@ -1,5 +1,12 @@
 plugins {
-    id 'net.neoforged.moddev' version '2.0.148'
+    // ⚠️ 1.20.1 用 **legacyforge** 而不是 moddev：
+    //    1.20.1 及更早版本 Forge 用 SRG 作为中间映射，ModDevGradle 把
+    //    「编译期用官方映射、发布时重混淆成 SRG」这套单独放在 legacyforge 插件里。
+    //    官方文档原话：*Forge used SRG mappings as intermediary mappings in
+    //    1.20.1 and below. While your mod is developed against the mappings
+    //    provided by Mojang (known as official mappings), you need to
+    //    reobfuscate it to SRG mappings.*
+    id 'net.neoforged.moddev.legacyforge' version '2.0.148'
     id 'org.jetbrains.kotlin.jvm' version '2.1.0'
 }
 
@@ -12,6 +19,11 @@ plugins {
 // 依赖 voidkit_core 前置：
 //   - 编译期：compileOnly libs/ 下的 core jar（用 ./fetch-core.sh 下载）
 //   - 运行期：由 mods.toml 声明 required，服主同时装 voidkit_core 即可
+//
+// ⚠️ 本分支 = Minecraft **1.20.1** + Forge 47.x（分支 mc/1.20.1）。
+//    1.21.1 + NeoForge 在 main、1.21.1 + Forge 在 mc/1.21.1-forge。
+//    业务代码三个分支**逐行相同**，唯一改写面 = platform/forge/ 事件桥
+//    + 本文件的构建配置。
 // ==============================================================
 
 group = 'org.voidkit'
@@ -21,42 +33,60 @@ version = '0.1.0-beta.1'
 base { archivesName = 'voidkit_inspector' }
 
 ext {
-    mcVersion = '1.21.1'
+    modId = 'voidkit_inspector'
+    mcVersion = '1.20.1'
+    // ⚠️ 1.20.1 用 **JDK 17**（与 1.21.x 的 21 不同）。
+    javaVersion = 17
+    forgeVersion = '1.20.1-47.4.20'
+    forgeRange = '[47,)'
+    mcRange = '[1.20.1,1.20.2)'
     // voidkit_core 的版本 —— **独立于本插件版本**（两个插件各自发版，节奏不同）。
     // 拿本插件版本去写 core 的依赖区间是最隐蔽的坑：区间不匹配 → mod 被静默跳过。
     coreVersion = '0.1.0-beta.1'
+    kotlinVersion = '2.1.0'
+    sqliteVersion = '3.53.4.0'
 }
 
-java.toolchain.languageVersion = JavaLanguageVersion.of(21)
-kotlin { jvmToolchain(21) }
+java.toolchain.languageVersion = JavaLanguageVersion.of(rootProject.ext.javaVersion)
+kotlin { jvmToolchain(rootProject.ext.javaVersion) }
 
 repositories {
-    // NeoForge 制品国内被 DNS 污染，走官方 CDN（详见 mirror.init.gradle）
+    // NeoForge/Forge 制品国内被 DNS 污染，走官方 CDN（详见 mirror.init.gradle）
     maven { url = 'https://neoforged.forgecdn.net/releases' }
     maven { url = 'https://maven.aliyun.com/repository/public' }
     maven { url = 'https://maven.aliyun.com/repository/central' }
     mavenCentral()
 }
 
-neoForge {
-    version = '21.1.209'
+// ⚠️ 1.20.1 的 DSL 块叫 `legacyForge`（不是 `neoForge`）
+legacyForge {
+    version = rootProject.ext.forgeVersion
     mods {
         'voidkit_inspector' {
             sourceSet(sourceSets.main)
         }
     }
+    runs {
+        // 开发服务端：core + inspector 都从 classpath 加载，与整合包真实加载路径一致
+        server {
+            server()
+            programArgument '--nogui'
+        }
+    }
 }
 
 dependencies {
-    implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.1.0'
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:${rootProject.ext.kotlinVersion}"
 
     // core 前置：编译期依赖（compileOnly），运行时由服主同装 voidkit_core。
-// ⚠️ 用 fileTree 通配而不是写死文件名 —— core 的版本号与命名规格会变，
-//    写死会导致「fetch-core.sh 下到了，但编译期看不到 core」这种难查的问题。
+    // ⚠️ 用 fileTree 通配而不是写死文件名 —— core 的版本号与命名规格会变，
+    //    写死会导致「fetch-core.sh 下到了，但编译期看不到 core」这种难查的问题。
+    // ⚠️ **加载器必须与本分支匹配**：core 的 jar 内含加载器 API，
+    //    1.21.1 版的 core 不能顶替 1.20.1（区间匹配不上 → mod 被静默跳过）。
     // Kotlin 运行时也由 core jar 携带（core 是唯一 jarJar kotlin 的），这里不重复 jarJar。
     compileOnly fileTree(dir: 'libs', include: ['voidkit_core-*.jar'])
 
-    // 单元测试（ChainCluster 聚类逻辑是纯数据计算，不需要起 MC 服务端）。
+    // 单元测试（ChainCluster / StructureSense 聚类逻辑是纯数据计算，不需要起 MC 服务端）。
     // core 是 compileOnly，不进 test classpath —— 这里补一份，保证测试编译符号完整。
     testImplementation fileTree(dir: 'libs', include: ['voidkit_core-*.jar'])
     testImplementation platform('org.junit:junit-bom:5.10.2')
@@ -67,7 +97,7 @@ dependencies {
     jarJar(implementation('org.xerial:sqlite-jdbc')) {
         version {
             strictly '[3.46,)'
-            prefer '3.53.4.0'
+            prefer rootProject.ext.sqliteVersion
         }
     }
 }
@@ -76,8 +106,8 @@ dependencies {
 //    所以必须把 Kotlin 运行时、SQLite 原生库、core 的类显式补进 run 的 classpath。
 afterEvaluate {
     dependencies {
-        additionalRuntimeClasspath 'org.jetbrains.kotlin:kotlin-stdlib:2.1.0'
-        additionalRuntimeClasspath 'org.xerial:sqlite-jdbc:3.53.4.0'
+        additionalRuntimeClasspath "org.jetbrains.kotlin:kotlin-stdlib:${rootProject.ext.kotlinVersion}"
+        additionalRuntimeClasspath "org.xerial:sqlite-jdbc:${rootProject.ext.sqliteVersion}"
         additionalRuntimeClasspath fileTree(dir: 'libs', include: ['voidkit_core-*.jar'])
     }
 }
@@ -96,30 +126,41 @@ test {
 
 processResources {
     def props = [
-        mod_version : version,
-        neo_range   : '[21.1.0,21.2.0)',
-        mc_range    : '[1.21.1,1.22)',
-        loader_range: '[4,)',
-        // ⚠️ voidkit_core 的版本区间**不能用 mod_version**。
-        // 早前写死成 "[${mod_version},)" 而 mod_version 是本插件自己的版本，
-        // 与 core 实际版本不同 → 区间永不匹配 → 依赖判定失败 →
-        // **整个 mod 被加载器静默跳过**（服务端照常 Done，只是没这个 mod）。
-        core_range  : "[${coreVersion},)",
+        mod_version : project.version,
+        // ⚠️ 占位符沿用 ${neo_range}（toml 里的名字），值是 **Forge 47** 依赖区间。
+        neo_range   : rootProject.ext.forgeRange,
+        mc_range    : rootProject.ext.mcRange,
+        loader_range: rootProject.ext.forgeRange,
+        // ⚠️ core 的版本区间**不能用 mod_version**：那是本插件自己的版本，
+        // 与 core 实际版本不同 → 区间永不匹配 → 依赖判定失败 → 整个 mod 被跳过。
+        core_range  : "[${rootProject.ext.coreVersion},)",
     ]
     inputs.properties props
-    filesMatching(['META-INF/neoforge.mods.toml']) { expand props }
+    filesMatching(['META-INF/mods.toml']) { expand props }
 }
 
-jar {
-    // 产物命名规格与套件对齐：<mod>-<version>+mc<mc>-<loader>.jar
-    archiveFileName = "voidkit_inspector-${version}+mc${mcVersion}-neoforge.jar"
+// ⚠️⚠️ 1.20.1 的**发布 jar 不由 `jar` 任务产出**：
+//     - `jar`      → `build/devlibs/`，**开发态**（官方映射名，只能 dev 环境用）
+//     - `reobfJar` → `build/libs/`，**重混淆后的发布态**（SRG 名，正式服要用这个）
+//    `reobfJar` 是 MDG 注册的**另一个** Jar 任务，**不会**继承 `jar` 上设的
+//    archiveFileName —— 不显式配就会退回 Gradle 默认名 `voidkit_inspector-0.1.0-beta.1.jar`，
+//    把版本线信息丢掉（多版本线发布时无法一眼分辨）。
+//    `tasks.matching{}` 是惰性的：对 1.21.x 线（没有这个任务）零影响。
+//
+//    ⚠️ 这与 1.21.1 两条线**完全不同**：它们都用官方映射，不需要 reobf，
+//    发布产物就是 `jar`。三条线的发布产物分别来自 jar / jarJar / reobfJar。
+tasks.matching { it.name == 'jar' }.configureEach {
+    archiveFileName = "${rootProject.ext.modId}-${project.version}+mc${rootProject.ext.mcVersion}-forge-dev.jar"
+}
+tasks.matching { it.name == 'reobfJar' }.configureEach {
+    archiveFileName = "${rootProject.ext.modId}-${project.version}+mc${rootProject.ext.mcVersion}-forge.jar"
     manifest {
         attributes([
-            'Specification-Title'   : 'voidkit_inspector',
+            'Specification-Title'   : rootProject.ext.modId,
             'Specification-Vendor'  : 'Kokuu Studio',
             'Specification-Version' : '1',
             'Implementation-Title'  : 'inspector',
-            'Implementation-Version': version,
+            'Implementation-Version': project.version,
             'Implementation-Vendor' : 'Kokuu Studio',
         ])
     }

@@ -483,7 +483,7 @@ class InspectorFeature : Feature() {
         if (!admit(actor)) return
         enqueue(
             LogEvent(now(), world, pos.x, pos.y, pos.z, actor, Source.playerUuid(player),
-                SourceKind.PLAYER, action, material, amount, Nbt.itemNbt(stack, player.level().registryAccess()))
+                SourceKind.PLAYER, action, material, amount, Nbt.itemNbt(stack))
         )
     }
 
@@ -522,7 +522,7 @@ class InspectorFeature : Feature() {
         val p = player.blockPosition()
         enqueue(
             LogEvent(now(), dim(level), p.x, p.y, p.z, actor, Source.playerUuid(player),
-                SourceKind.PLAYER, Actions.DROP, material, stack.count, Nbt.itemNbt(stack, level.registryAccess()))
+                SourceKind.PLAYER, Actions.DROP, material, stack.count, Nbt.itemNbt(stack))
         )
     }
 
@@ -540,7 +540,7 @@ class InspectorFeature : Feature() {
         val p = player.blockPosition()
         enqueue(
             LogEvent(now(), dim(level), p.x, p.y, p.z, actor, Source.playerUuid(player),
-                SourceKind.PLAYER, Actions.PICKUP, material, stack.count, Nbt.itemNbt(stack, level.registryAccess()))
+                SourceKind.PLAYER, Actions.PICKUP, material, stack.count, Nbt.itemNbt(stack))
         )
     }
 

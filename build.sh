@@ -2,7 +2,7 @@
 # VoidkitCore 构建入口（Windows Git Bash / Linux 通用）
 #
 # 两件事：
-#   1) 强制使用 JDK 21（MC 1.21.1 要求；本机默认 java 是 25，Gradle 8 用不了）
+#   1) 强制使用 JDK 17（MC 1.20.1 要求；1.21.x 线才是 21）
 #   2) 带上镜像重定向 init script（maven.neoforged.net 国内被污染）
 #
 # 用法：./build.sh build        → 产出 build/libs/voidkit-<version>.jar
@@ -12,15 +12,15 @@ set -e
 cd "$(dirname "$0")"
 
 # ---- JDK 21 ----
-JDK21="${KOKUU_JDK21:-C:/Users/26703/.jdks/jdk-21.0.12.1+1}"
-if [ ! -x "$JDK21/bin/java" ] && [ ! -f "$JDK21/bin/java.exe" ]; then
-  echo "找不到 JDK 21: $JDK21"
-  echo "请设置 KOKUU_JDK21 指向 JDK 21 安装目录"
+JDK_HOME="${KOKUU_JDK:-C:/Users/26703/.jdks/jdk-17.0.20.1+1}"
+if [ ! -x "$JDK_HOME/bin/java" ] && [ ! -f "$JDK_HOME/bin/java.exe" ]; then
+  echo "找不到 JDK 17: $JDK_HOME"
+  echo "请设置 KOKUU_JDK 指向 JDK 17 安装目录"
   exit 1
 fi
-export JAVA_HOME="$JDK21"
+export JAVA_HOME="$JDK_HOME"
 # Git Bash 只认 POSIX 形式的 PATH 条目，Windows 风格路径会被静默忽略
-JDK_POSIX=$(echo "$JDK21" | sed -E 's#^([A-Za-z]):#/\L\1#')
+JDK_POSIX=$(echo "$JDK_HOME" | sed -E 's#^([A-Za-z]):#/\L\1#')
 export PATH="$JDK_POSIX/bin:$PATH"
 
 # ---- 代理（如本机有 HTTP 代理则透传给 Gradle） ----

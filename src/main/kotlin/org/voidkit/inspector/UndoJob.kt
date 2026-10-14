@@ -112,7 +112,8 @@ class UndoJob private constructor(
                 restoredBlocks++
                 val nbt = Nbt.decode(task.nbt)
                 if (nbt != null && state.hasBlockEntity()) {
-                    val be = BlockEntity.loadStatic(task.pos, state, nbt, level.registryAccess())
+                    // ⚠️ 1.20.1 的 loadStatic 只收三个参数（无 HolderLookup.Provider）
+                    val be = BlockEntity.loadStatic(task.pos, state, nbt)
                     if (be != null) {
                         level.setBlockEntity(be)
                         restoredContainers++

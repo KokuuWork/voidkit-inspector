@@ -181,7 +181,9 @@ class RollbackJob private constructor(
                 restoredBlocks++
                 val nbt = task.nbt
                 if (nbt != null && state.hasBlockEntity()) {
-                    val be = BlockEntity.loadStatic(task.pos, state, nbt, level.registryAccess())
+                    // ⚠️ 1.20.1 的 loadStatic **只收三个参数**（没有 HolderLookup.Provider），
+                    //    1.21.x 才需要传注册表（component 解析要用）。
+                    val be = BlockEntity.loadStatic(task.pos, state, nbt)
                     if (be != null) {
                         level.setBlockEntity(be)
                         restoredContainers++
@@ -210,8 +212,11 @@ class RollbackJob private constructor(
                     runtimeMachineSkips.merge(beKey, 1, Int::plus)
                     return
                 }
-                val stack = task.itemTag?.let { ItemStack.parse(level.registryAccess(), it).orElse(null) }
-                if (stack == null) {
+                // ⚠️ 1.20.1 没有 component 系统：还原物品用 `ItemStack.of(tag)`
+                //    直接从 NBT 重建（1.21.x 是 `ItemStack.parse(registry, tag)`，
+                //    返回 Optional，且 component 解析要注册表）。
+                val stack = task.itemTag?.let { ItemStack.of(it) }
+                if (stack == null || stack.isEmpty) {
                     errors++
                     return
                 }
@@ -243,7 +248,9 @@ class RollbackJob private constructor(
             if (remaining.isEmpty) return 0
             val slot = container.getItem(i)
             if (slot.isEmpty) continue
-            if (slot.count < slotMax && ItemStack.isSameItemSameComponents(slot, remaining)) {
+            // ⚠️ 1.20.1：判定「同类物品」用 `isSameItemSameTags`（比 NBT tag）；
+            //    1.21.x 改叫 `isSameItemSameComponents`（比 component）。
+            if (slot.count < slotMax && ItemStack.isSameItemSameTags(slot, remaining)) {
                 val move = minOf(slotMax - slot.count, remaining.count)
                 slot.count += move
                 remaining.count -= move

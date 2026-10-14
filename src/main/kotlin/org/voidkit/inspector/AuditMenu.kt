@@ -1,6 +1,5 @@
 package org.voidkit.inspector
 
-import net.minecraft.core.component.DataComponents
 import net.minecraft.network.chat.Component
 import net.minecraft.server.level.ServerPlayer
 import net.minecraft.world.Container
@@ -11,11 +10,42 @@ import net.minecraft.world.inventory.ChestMenu
 import net.minecraft.world.inventory.ClickType
 import net.minecraft.world.inventory.MenuType
 import net.minecraft.world.item.ItemStack
-import net.minecraft.world.item.component.ItemLore
 import org.voidkit.core.util.Icons
 import org.voidkit.core.util.Text
 import java.text.SimpleDateFormat
 import java.util.Date
+
+/**
+ * ⚠️ **1.20.1 的 GUI 文本要走 NBT `display` 标签，没有 data component。**
+ *
+ * 1.20.5 才引入的 `DataComponents.CUSTOM_NAME` / `ItemLORE` 在 1.20.1 根本不存在，
+ * 1.21.x 的写法在这条分支上是 `Unresolved reference`。
+ * 1.20.1 的等价写法是手写 `display` 子标签：
+ * ```
+ * {"display":{"Name":'{"text":"…"}',"Lore":['{"text":"…"}', …]}}
+ * ```
+ * 注意 lore 是**字符串数组**，每项 itself 是一段 JSON 文本 —— 不是嵌套对象。
+ *
+ * 这些图标只给**服主自己**看（检查模式下的查询结果 GUI），所以手写 NBT 完全够用；
+ * 不引入额外依赖去解析 JSON 文本。
+ */
+private fun ItemStack.setDisplay(name: Component?, lore: List<Component>?) {
+    val tag = this.tag ?: net.minecraft.nbt.CompoundTag().also { this.tag = it }
+    val display = tag.getCompound("display")
+    if (name != null) {
+        // 1.20.1 的 Component 序列化入口是 Component.Serializer.toJson（静态方法）。
+        // ⚠️ 1.21.x 换成了 ComponentSerialization / GSON codec，方法名与位置都不同，
+        //    这也是 1.20.1 → 1.21.x 移植的一个坑。
+        display.putString("Name", Component.Serializer.toJson(name))
+    }
+    if (lore != null) {
+        display.put("Lore", net.minecraft.nbt.ListTag().also { list ->
+            lore.forEach { list.add(net.minecraft.nbt.StringTag.valueOf(Component.Serializer.toJson(it))) }
+        })
+    }
+    tag.put("display", display)
+    this.tag = tag
+}
 
 /** 时间格式（`MM-dd HH:mm:ss`），只在游戏主线程使用，无需加锁。 */
 private val TIME_FORMAT = SimpleDateFormat("MM-dd HH:mm:ss")
@@ -76,7 +106,7 @@ private class AuditContainer(rows: List<InspectorDb.QueryRow>, hasNext: Boolean)
         val stack = Icons.of(row.material)
         stack.setCount(row.amount.coerceIn(1, 64))
         val action = Actions.NAMES[row.action] ?: "?"
-        stack.set(DataComponents.CUSTOM_NAME, Text.legacy("&e$action &f${row.material}"))
+        stack.setDisplay(Text.legacy("&e$action &f${row.material}"), null)
 
         val time = TIME_FORMAT.format(Date(row.time))
         val isPlayer = row.source == SourceKind.PLAYER.id
@@ -89,16 +119,13 @@ private class AuditContainer(rows: List<InspectorDb.QueryRow>, hasNext: Boolean)
         lore += Text.legacy("&7数量：&f${row.amount}")
         lore += if (row.nbt != null) Text.legacy("&6◆ 含 NBT 数据") else Text.legacy("&8无 NBT")
         lore += Text.legacy("&7点击在聊天中查看完整信息")
-        stack.set(DataComponents.LORE, ItemLore(lore))
+        stack.setDisplay(null, lore)
         return stack
     }
 
     private fun button(icon: String, name: String, lore: List<String>): ItemStack {
         val stack = Icons.of(icon)
-        stack.set(DataComponents.CUSTOM_NAME, Text.legacy(name))
-        if (lore.isNotEmpty()) {
-            stack.set(DataComponents.LORE, ItemLore(lore.map { Text.legacy(it) }))
-        }
+        stack.setDisplay(Text.legacy(name), lore.map { Text.legacy(it) }.takeIf { it.isNotEmpty() })
         return stack
     }
 }

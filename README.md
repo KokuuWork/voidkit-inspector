@@ -26,7 +26,7 @@ ME 网络照样瘫。所以回滚做了五层设计（见下文），核心原�
 |---|---|---|---|---|
 | 1.21.1 | NeoForge 21.1.x | `main` | `voidkit_inspector-<版本>+mc1.21.1-neoforge.jar` | ✅ |
 | 1.21.1 | Forge 52.1.x | `mc/1.21.1-forge` | `voidkit_inspector-<版本>+mc1.21.1-forge.jar` | ✅ |
-| 1.20.1 | Forge 47.4.x | `mc/1.20.1` | `voidkit_inspector-<版本>+mc1.20.1-forge.jar` | — |
+| 1.20.1 | Forge 47.4.x | `mc/1.20.1` | `voidkit_inspector-<版本>+mc1.20.1-forge.jar` | ✅ |
 
 - **本分支 `main` 对应 1.21.1 + NeoForge**；其它版本线见上表。
 - 所有版本线的 jar 挂在**同一个 release** 下，按文件名后缀区分，勿混用。
@@ -274,12 +274,20 @@ inspector/
 ## 7. 开发
 
 ```bash
-./fetch-core.sh        # 从 voidkit Release 下载 voidkit_core jar 到 libs/
-./build.sh build       # → build/libs/voidkit_inspector-<版本>.jar
+./fetch-core.sh        # 从 voidkit Release 下载 voidkit_core jar到 libs/
+                       # 默认按当前分支自动推断版本线（MC 版本 + 加载器）
+./build.sh build       # →build/libs/voidkit_inspector-<版本>+mc<版本>-<加载器>.jar
 ./build.sh runServer   # 开发服务端
 ```
 
-- JDK 21（`C:/Users/26703/.jdks/jdk-21.0.12.1+1`）。
+三条版本线的构建配置各不相同（**代码逐行相同，差的只有构建与平台层**）：
+
+| 分支 | MC / 加载器 | 构建插件 | Gradle | 发布 jar 来自 | 运行时映射 | JDK |
+|---|---|---|---|---|---|---|
+| `main` | 1.21.1 NeoForge 21.1.x | ModDevGradle | 8.12.1 | `jar` | 官方映射，不reobf | 21 |
+| `mc/1.21.1-forge` | 1.21.1 Forge 52.1.x | ForgeGradle 7 + `jarjar` | 9.3.1 | `jarJar` | 官方映射，不 reobf | 21（配置期还解析 25） |
+| `mc/1.20.1` | 1.20.1 Forge 47.4.x | ModDevGradle `legacyforge` | 8.12.1 | **`reobfJar`** | **SRG，要重混淆** | **17** |
+
 - core 前置是 **`compileOnly libs/` 下的 jar**（由 `fetch-core.sh` 下载），
   不是组合构建 —— Inspector 只需要 core 的 12 个 API 符号，不需要源码级联编译。
 - 全 Kotlin，注释讲「为什么」；零 mixin；中文注释。
@@ -289,3 +297,51 @@ inspector/
   撞成两个同名模块，JPMS 直接 `ResolutionException`。
 - 测试：`./gradlew test` —— `ChainCluster` / `RollbackPolicy` / `StructureSense`
   都是纯数据计算，不需要起 MC 服务端。
+
+### 跨版本移植时踩过的坑
+
+写新版本线时几乎必然会再遇到这几个，每一个都是**编译过、真机才炸**：
+
+- **1.20.x↔ 1.21.x 的数据模型断层**（不是 API 改名，是模型换了）：
+
+  | 用途 | 1.21.x | 1.20.1 |
+  |---|---|---|
+  | 物品附加数据 | `DataComponents` / `stack.components` | NBT `stack.tag` |
+  | 保存方块实体 | `be.saveWithFullMetadata(registry)` | `be.saveWithFullMetadata()` |
+  | 还原方块实体 | `BlockEntity.loadStatic(pos, state, tag, registry)` | `loadStatic(pos, state, tag)` |
+  | 从 NBT 还原物品 | `ItemStack.parse(registry, tag).orElse(null)` | `ItemStack.of(tag)` |
+  | 同类物品判定 | `isSameItemSameComponents` | `isSameItemSameTags` |
+  | GUI 物品名/lore | `stack.set(DataComponents.CUSTOM_NAME, …)` + `ItemLore` | 手写 NBT `display` 子标签 + `Component.Serializer.toJson` |
+
+  改动集中在 `Nbt.kt` / `AuditMenu.kt` / `RollbackJob.kt` / `UndoJob.kt` 四个文件，
+  **业务层与平台层都不用动** —— 这就是四层架构的回报。
+- **`reobfJar` 的产物目录不是 `build/libs/`？** 恰恰相反：ModDevGradle 下
+  `reobfJar` 产 `build/libs/`（发布态，SRG 名），`jar` 产 `build/devlibs/`（开发态，官方名）。
+  装错目录 = 装错形态，正式服直接类找不到。
+- **`reobfJar` 不继承 `jar` 上设的 `archiveFileName`**，不显式配会退回默认名
+  （丢掉版本线信息，发布时三个版本的 jar 名字会撞）。
+- **Forge 的 `mods.toml` 每个 `[[dependencies.*]]` 必须显式 `mandatory = true`** ——
+  NeoForge 默认填 true，Forge 不填就没有。另外 loader modId 必须是 `forge`，
+  且没有 `type = "required"`（那是 NeoForge 的字段）。
+- **`@Mod` 类不能用构造器注入**（Forge 52 不支持，只能无参构造器），
+  且 **`ServerAboutToStartEvent` 是游戏总线事件**，挂到mod 总线上会抛
+  `IllegalArgumentException: … not valid for this bus` —— NeoForge 的 mod 总线
+  **不转发**游戏事件，与直觉相反。
+- **Forge 52 的服务端日志不打印模组清单**（NeoForge 才打），E2E 判据别照抄 NeoForge 那套。
+- **E2E 判据只用ASCII 锚点**（如 `voidkit_inspector\(1\)`）：服务端日志中文编码不固定，
+  同版本下 GBK / UTF-8 都实测到，grep 中文会随机假失败。
+- **Windows 上起 Forge 服务端要用 `win_args.txt`**，不能选 `unix_args.txt` ——
+  后者classpath 用 `:` 分隔，Windows 的 java 认`;`，会在 boot layer 就炸
+  `InvalidPathException: Illegal char <:>`，且错误发生在 mod 加载**之前**，极易误判成模组有问题。
+
+### 端到端验证
+
+`tools/e2e-*.sh`各自对应一条版本线，用**真实服务端 + 发布态jar** 跑一遍：
+
+```bash
+SERVER_DIR=<已装好的服务端目录> ./tools/e2e-<版本线>-server.sh
+```
+
+判据不是「服务端起来了」—— mods.toml 写错时 mod 会被**静默跳过**，`Done` 照样出现。
+真正的判据是core 的模块统计里 `voidkit_inspector(1)` + `voidkit/inspector/inspector.db`
+的 WAL 有实际写入（证明事件桥真的被调用、jarJar 的 SQLite 原生库可用）。
