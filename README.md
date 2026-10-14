@@ -24,9 +24,9 @@ ME 网络照样瘫。所以回滚做了五层设计（见下文），核心原�
 
 | Minecraft | 加载器 | 分支 | jar |
 |---|---|---|---|
-| 1.21.1 | NeoForge 21.1.x | `main` | `voidkit_inspector-<版本>-mc1.21.1-neoforge.jar` |
-| 1.21.1 | Forge 52.1.x | `mc/1.21.1-forge` | `voidkit_inspector-<版本>-mc1.21.1-forge.jar` |
-| 1.20.1 | Forge 47.4.x | `mc/1.20.1` | `voidkit_inspector-<版本>-mc1.20.1-forge.jar` |
+| 1.21.1 | NeoForge 21.1.x | `main` | `voidkit_inspector-<版本>+mc1.21.1-neoforge.jar` |
+| 1.21.1 | Forge 52.1.x | `mc/1.21.1-forge` | `voidkit_inspector-<版本>+mc1.21.1-forge.jar` |
+| 1.20.1 | Forge 47.4.x | `mc/1.20.1` | `voidkit_inspector-<版本>+mc1.20.1-forge.jar` |
 
 - **本分支 `main` 对应 1.21.1 + NeoForge**；其它版本线见上表。
 - 所有版本线的 jar 挂在**同一个 release** 下，按文件名后缀区分，勿混用。
@@ -267,19 +267,60 @@ inspector/
 
 ## 7. 开发
 
+三条版本线是**三个分支**，各自的构建插件不同：
+
+| 分支 | MC / 加载器 | 构建插件 | Gradle | 发布 jar 来自 | 运行时映射 |
+|---|---|---|---|---|---|
+| `main` | 1.21.1 NeoForge 21.1.x | ModDevGradle | 8.12.1 | `jar` | 官方映射，不 reobf |
+| `mc/1.21.1-forge` | 1.21.1 Forge 52.1.x | **ForgeGradle 7** + `net.minecraftforge.jarjar` | **9.3.1** | **`jarJar` 任务** | 官方映射，不 reobf |
+| `mc/1.20.1` | 1.20.1 Forge 47.4.x | ModDevGradle `legacyforge` | 8.12.1 | **`reobfJar`** | SRG，要重混淆 |
+
+三条线的**业务代码（`InspectorFeature` / `RollbackJob` / `ChainCluster` / …）逐行相同**，
+唯一改写面 = `platform/<加载器>/` 这层事件桥 + 构建配置。这也是本模组平台层能这么薄的原因。
+
 ```bash
-./fetch-core.sh        # 从 voidkit Release 下载 voidkit_core jar 到 libs/
-./build.sh build       # → build/libs/voidkit_inspector-<版本>.jar
-./build.sh runServer   # 开发服务端
+./fetch-core.sh                        # 下载 voidkit_core jar 到 libs/
+                                      # 默认 forge 版；NeoForge 线传 neoforge
+./build.sh build                       # → build/libs/voidkit_inspector-<版本>+mc<mc>-<loader>.jar
+./build.sh runServer                   # 开发服务端
 ```
 
 - JDK 21（`C:/Users/26703/.jdks/jdk-21.0.12.1+1`）。
+  ⚠️ **ForgeGradle 7 在配置 `runs` 时会去解析 JDK 25 工具链**（编译目标仍是 21），
+  所以 `gradle.properties` 的 `org.gradle.java.installations.paths` 必须**同时**登记
+  JDK 17 与 `C:/Program Files/Microsoft/jdk-25.0.3.9-hotspot`，否则报
+  `No matching toolchains found ... languageVersion=25`。
 - core 前置是 **`compileOnly libs/` 下的 jar**（由 `fetch-core.sh` 下载），
-  不是组合构建 —— Inspector 只需要 core 的 12 个 API 符号，不需要源码级联编译。
+  不是组合构建 —— Inspector 只需要 core 的少量 API 符号，不需要源码级联构建。
+  ⚠️ 用 `fileTree` 通配而不是写死文件名，且**加载器必须与分支匹配**
+  （core 的 jar 内含加载器 API，NeoForge 版与 Forge 版不能互相顶替）。
 - 全 Kotlin，注释讲「为什么」；零 mixin；中文注释。
-- SQLite 驱动 jarJar 进本 jar（`strictly '[3.46,)'` 只锁下界，让 FML 仲裁）。
-  开发运行时 `runServer` 从 classes 加载、jarJar 不生效，所以 `additionalRuntimeClasspath`
-  补了 SQLite 原生库与 Kotlin 运行时 —— **发布 jar 里不要重复补**，会和 core 的 jarJar
-  撞成两个同名模块，JPMS 直接 `ResolutionException`。
+- SQLite 驱动 jarJar 进本 jar（只锁下界，让加载器仲裁）。
+  - **NeoForge 线**（ModDevGradle）：`jarJar(impl)` 同时进编译 classpath，
+    开发运行时 `runServer` 从 classes 加载、jarJar 不生效，所以要用
+    `additionalRuntimeClasspath` 补 SQLite 原生库与 Kotlin 运行时。
+  - **ForgeGradle 7 线**：写成 `jarJar "g:a:v"` 放进名为 `jarJar` 的 configuration，
+    它**只喂打包、不进编译 classpath**，所以必须**另外**声明一次 `implementation`
+    （否则 `InspectorDb` 报 `Unresolved reference 'sqlite'`）。FG7 也没有
+    `additionalRuntimeClasspath` —— 它的 `runs` 直接走完整 `runtimeClasspath`。
+  - ⚠️ **发布 jar 里不要重复 jarJar kotlin-stdlib** —— core 是唯一 jarJar kotlin 的模块，
+    两边都是 module-named jar，JPMS 会报 `reads more than one module named kotlin.stdlib`。
 - 测试：`./gradlew test` —— `ChainCluster` / `RollbackPolicy` / `StructureSense`
   都是纯数据计算，不需要起 MC 服务端。
+
+### 踩过的坑
+
+- **`mods.toml`（Forge）与 `neoforge.mods.toml`（NeoForge）不能互换**，三处必不同：
+  loader modId 是 `forge`（不是 `neoforge`）、每个 `[[dependencies.*]]` **必须显式
+  `mandatory = true`**（Forge 不给默认值）、不写 `type = "required"`。
+  写错的表现是**静默跳过整个 mod** —— 服务端照常启动，就是没这个 mod，极易误判成 E2E 通过。
+- **`voidkit_core` 的 `versionRange` 不能用本插件自己的版本号**。
+  两个插件各自发版、节奏不同；用 `mod_version` 会得到一个永不匹配的区间，
+  依赖判定失败 → mod 被跳过。必须单独维护 `coreVersion`。
+- **ForgeGradle 7 的 `repositories` 必须调 `minecraft.mavenizer(it)`**，
+  否则报 `Could not isolate value ...MavenizerValueSource$Parameters`。
+- **捡拾事件两边形状不同**（平台层唯一非 import 的差异）：
+  NeoForge `ItemEntityPickupEvent.Pre`（Pre/Post 两阶段，字段 `itemEntity`）；
+  Forge 52 `EntityItemPickupEvent`（**单阶段**，无 `itemEntity` 字段，要用 `getItem()`）。
+- **版本号必须是合法语义化版本**：`0.1.0-beta.1` 可以，`beta0.1` 不行
+  （`InvalidModFileException: Illegal version number` → 整个 jar 被跳过不加载）。

@@ -1,6 +1,9 @@
 plugins {
-    id 'net.neoforged.moddev' version '2.0.148'
-    id 'org.jetbrains.kotlin.jvm' version '2.1.0'
+    // ⚠️ FG7 把 Jar-in-Jar 拆成了独立插件（FG5/6 的 jarJar.enable() 已不存在）。
+    // 官方示例：MDKExamples/jarjar-only/fg7-kotlin
+    id 'net.minecraftforge.gradle' version '[7.0.3,8)'
+    id 'net.minecraftforge.jarjar' version '0.2.3'
+    id 'org.jetbrains.kotlin.jvm' version '2.4.21'
 }
 
 // ==============================================================
@@ -12,67 +15,97 @@ plugins {
 // 依赖 voidkit_core 前置：
 //   - 编译期：compileOnly libs/ 下的 core jar（用 ./fetch-core.sh 下载）
 //   - 运行期：由 mods.toml 声明 required，服主同时装 voidkit_core 即可
+//
+// ⚠️ 本分支 = Minecraft 1.21.1 + **Forge** 52.x（分支 mc/1.21.1-forge）。
+//    1.21.1 + NeoForge 21.1.x 在 main 分支，构建插件是 ModDevGradle。
+//    业务代码两个分支**逐行相同**，唯一差别 = platform/forge/ 与 platform/neoforge/
+//    这两份事件桥 + 本文件的构建配置。
 // ==============================================================
 
 group = 'org.voidkit'
-version = '1.2.0'
+// 与 voidkit 套件其余模块同一规格：<mod>-0.1.0-beta.1+mc<版本>-<loader>.jar
+version = '0.1.0-beta.1'
 
-base { archivesName = 'voidkit_inspector' }
+ext {
+    // ⚠️ 版本字面量必须是合法语义化版本：Forge 的 mods.toml 拒绝 'beta0.1' 这类
+    // 非数字开头形式（InvalidModFileException: Illegal version number，
+    // 整个 jar 被跳过不加载，已实测复现）。人类命名 beta0.1 只出现在 release title/notes。
+    modId = 'voidkit_inspector'
+    authors = 'Kokuu Studio'
+
+    mcVersion = '1.21.1'
+    // Forge 1.21.1 = Forge 52.x（ForgeGradle 7）
+    forgeVersion = '1.21.1-52.1.19'
+    // ⚠️ Forge 1.21.1 运行时用**官方映射**（不是 SRG）→ **不需要 reobf**，
+    //    build/libs 的 jar 就是发布产物（与 mc/1.20.1 线完全不同）。
+    forgeRange = '[52,)'
+    mcRange = '[1.21.1,1.22)'
+
+    kotlinVersion = '2.4.21'
+    sqliteVersion = '3.53.4.0'
+    // voidkit_core 的版本 —— 独立于本插件版本（两个插件各自发版，节奏不同）。
+    coreVersion = '0.1.0-beta.1'
+}
+
+base { archivesName = rootProject.ext.modId }
 
 java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 kotlin { jvmToolchain(21) }
 
 repositories {
-    // NeoForge 制品国内被 DNS 污染，走官方 CDN（详见 mirror.init.gradle）
-    maven { url = 'https://neoforged.forgecdn.net/releases' }
+    // 🚨 ForgeGradle 的 mavenizer —— **必须调用**（官方 MDK 的原样写法）。
+    //    它把 Forge maven 的元数据「maven 化」以供 minecraft.dependency(...) 解析。
+    //    漏了会报：Could not isolate value ...MavenizerValueSource$Parameters。
+    minecraft.mavenizer(it)
+    maven fg.forgeMaven
+    maven fg.minecraftLibsMaven
     maven { url = 'https://maven.aliyun.com/repository/public' }
     maven { url = 'https://maven.aliyun.com/repository/central' }
     mavenCentral()
 }
 
-neoForge {
-    version = '21.1.209'
-    mods {
-        'voidkit_inspector' {
-            sourceSet(sourceSets.main)
-        }
-    }
+minecraft {
+    mappings channel: 'official', version: rootProject.ext.mcVersion
 }
 
+// ⚠️ jarJar.register() **必须**在下面那个含 jarJar(...) 的 dependencies 块**之前**——
+//    它创建名为 `jarJar` 的 configuration，顺序反了会报
+//    "Could not find method jarJar() for arguments [...] on DefaultDependencyHandler"。
+jarJar.register()
+
 dependencies {
-    implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.1.0'
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:${rootProject.ext.kotlinVersion}"
+    implementation minecraft.dependency("net.minecraftforge:forge:${rootProject.ext.forgeVersion}")
 
     // core 前置：编译期依赖（compileOnly），运行时由服主同装 voidkit_core。
-// ⚠️ 用 fileTree 通配而不是写死文件名 —— core 的版本号与命名规格会变，
-//    写死会导致「fetch-core.sh 下到了，但编译期看不到 core」这种难查的问题。
+    // ⚠️ 用 fileTree 通配而不是写死文件名 —— core 的版本号与命名规格会变，
+    //    写死会导致「fetch-core.sh 下到了，但编译期看不到 core」这种难查的问题。
     // Kotlin 运行时也由 core jar 携带（core 是唯一 jarJar kotlin 的），这里不重复 jarJar。
     compileOnly fileTree(dir: 'libs', include: ['voidkit_core-*.jar'])
 
-    // 单元测试（ChainCluster 聚类逻辑是纯数据计算，不需要起 MC 服务端）。
+    // 单元测试（ChainCluster / StructureSense 聚类逻辑是纯数据计算，不需要起 MC 服务端）。
     // core 是 compileOnly，不进 test classpath —— 这里补一份，保证测试编译符号完整。
     testImplementation fileTree(dir: 'libs', include: ['voidkit_core-*.jar'])
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 
-    // 嵌入式 SQLite 驱动：jarJar 打进本 jar（版本区间只锁下界，让 FML 仲裁）。
-    jarJar(implementation('org.xerial:sqlite-jdbc')) {
-        version {
-            strictly '[3.46,)'
-            prefer '3.53.4.0'
-        }
-    }
+    // 嵌入式 SQLite 驱动：jarJar 内置（约 13MB 原生库）。
+    //
+    // ⚠️ FG7 的 jarJar 依赖写进**名为 jarJar 的 configuration**（不是 jarJar(...)方法）：
+    //    版本语义同 core —— 写精确版本，约束成为 [该版本,)，只锁下界，
+    //    这样整合包里已有更高版本 sqlite-jdbc 时不会冲突。
+    jarJar("org.xerial:sqlite-jdbc:${rootProject.ext.sqliteVersion}")
+    // ⚠️ FG7 的 `jarJar` configuration **只喂打包，不进编译 classpath**
+    //（ModDevGradle 的 jarJar(impl) 会同时给 implementation）。所以 sqlite
+    // 必须**另外**声明一次 implementation，否则 InspectorDb 编译期找不到
+    // org.sqlite.SQLiteDataSource（实测报 Unresolved reference 'sqlite'）。
+    implementation "org.xerial:sqlite-jdbc:${rootProject.ext.sqliteVersion}"
 }
 
-// ⚠️ 开发运行时（runServer）从 classes 目录加载本模组，jarJar 的嵌套 jar 不生效，
-//    所以必须把 Kotlin 运行时、SQLite 原生库、core 的类显式补进 run 的 classpath。
-afterEvaluate {
-    dependencies {
-        additionalRuntimeClasspath 'org.jetbrains.kotlin:kotlin-stdlib:2.1.0'
-        additionalRuntimeClasspath 'org.xerial:sqlite-jdbc:3.53.4.0'
-        additionalRuntimeClasspath fileTree(dir: 'libs', include: ['voidkit_core-*.jar'])
-    }
-}
+// ⚠️ 开发运行时（runServer）：**FG7 不需要** additionalRuntimeClasspath
+//    （那是 ModDevGradle 专有）。FG7 的 runs 直接走完整 runtimeClasspath。
+//    保留说明是为了对照：NeoForge 线那份在 main 分支的 build.gradle 里。
 
 tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
@@ -88,24 +121,37 @@ test {
 
 processResources {
     def props = [
-        mod_version : version,
-        neo_range   : '[21.1.0,21.2.0)',
-        mc_range    : '[1.21.1,1.22)',
-        loader_range: '[4,)',
+        mod_version : project.version,
+        // ⚠️ 占位符沿用 ${neo_range}（mods.toml 里的名字），值是 **Forge** 依赖区间。
+        neo_range   : rootProject.ext.forgeRange,
+        mc_range    : rootProject.ext.mcRange,
+        loader_range: rootProject.ext.forgeRange,
+        // ⚠️ core 的版本区间**不能用 mod_version**：那是本插件自己的版本，
+        // 与 core 实际版本不同 → 区间永不匹配 → mods.toml 判定依赖缺失 → 整个 mod 被跳过加载。
+        core_range  : "[${rootProject.ext.coreVersion},)",
     ]
     inputs.properties props
-    filesMatching(['META-INF/neoforge.mods.toml']) { expand props }
+    filesMatching(['META-INF/mods.toml']) { expand props }
+}
+
+// ⚠️ FG7 的 jarJar 产出**独立任务**（不是 jar 的一部分）：sqlite-jdbc 走它。
+//    我们让 jarJar 用规范名（发布产物），普通 jar 退为 -slim（同 core / guard 的做法）。
+tasks.named('jarJar', Jar) {
+    archiveFileName = "${rootProject.ext.modId}-${project.version}+mc${rootProject.ext.mcVersion}-forge.jar"
+}
+tasks.named('jar', Jar) {
+    archiveFileName = "${rootProject.ext.modId}-${project.version}+mc${rootProject.ext.mcVersion}-forge-slim.jar"
 }
 
 jar {
     manifest {
         attributes([
-            'Specification-Title'   : 'voidkit_inspector',
-            'Specification-Vendor'  : 'Kokuu Studio',
+            'Specification-Title'   : rootProject.ext.modId,
+            'Specification-Vendor'  : rootProject.ext.authors,
             'Specification-Version' : '1',
             'Implementation-Title'  : 'inspector',
-            'Implementation-Version': version,
-            'Implementation-Vendor' : 'Kokuu Studio',
+            'Implementation-Version': project.version,
+            'Implementation-Vendor' : rootProject.ext.authors,
         ])
     }
 }

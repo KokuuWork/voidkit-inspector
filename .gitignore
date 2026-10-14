@@ -7,3 +7,7 @@ logs/
 libs/*.jar
 .idea/
 *.iml
+
+# E2E 环境（真服务端，含 worlds / logs / 安装产物，不入库）
+build/e2e-*/
+libs/*.jar

@@ -18,23 +18,29 @@ pollute the log.
 Requires voidkit_core. Server-side only.
 '''
 
+# ⚠️ Forge 的 mods.toml 与 NeoForge 的 neoforge.mods.toml 有三处**必须**不同，
+#    写错会被加载器静默跳过整个 mod（E2E 假阳性踩坑）：
+#    1. loader modId 是 "forge"（不是 "neoforge"）
+#    2. 每个 [[dependencies.*]] 必须**显式**写 mandatory = true（Forge 不给默认值）
+#    3. 不用写 type = "required"（那是 NeoForge 的字段，Forge 用 mandatory）
 [[dependencies.voidkit_inspector]]
-modId = "neoforge"
-type = "required"
+modId = "forge"
+mandatory = true
 versionRange = "${neo_range}"
 ordering = "NONE"
 side = "BOTH"
 
 [[dependencies.voidkit_inspector]]
 modId = "minecraft"
-type = "required"
+mandatory = true
 versionRange = "${mc_range}"
 ordering = "NONE"
 side = "BOTH"
 
+# ⚠️ core 的区间来自 core_range（本插件版本可能与 core 不同步，不能用 mod_version）
 [[dependencies.voidkit_inspector]]
 modId = "voidkit_core"
-type = "required"
-versionRange = "[${mod_version},)"
+mandatory = true
+versionRange = "${core_range}"
 ordering = "AFTER"
 side = "SERVER"
