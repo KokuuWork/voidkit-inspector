@@ -335,6 +335,14 @@ inspector/
   撞成两个同名模块，JPMS 直接 `ResolutionException`。
 - 测试：`./gradlew test` —— `ChainCluster` / `RollbackPolicy` / `StructureSense`
   都是纯数据计算，不需要起 MC 服务端。
+- **Gradle 走不通时的备用测试路径**：`./tools/offline-test.sh`
+  （三条版本线都支持，实测各39 个测试全绿）。它绕开 Gradle，直接用
+  `kotlin-compiler-embeddable` + JUnit Launcher 编译并跑测试。当
+  `createMinecraftArtifacts` 卡在 NeoForm Runtime 下载、`--offline` 也救不回来时用它。
+  脚本会自动认出当前是哪条线（1.20.1 / 1.21.1 NeoForge / 1.21.1 ForgeGradle 7），
+  并自动挑选对应的 MC 制品与 Kotlin 编译器版本 —— 三条线的 classpath 形状完全不同，
+  手拼必踩。**注意：脚本里的 `-jvm-target 21` 与 JDK 21 只是编译/运行工具链**，
+  与发布 jar 的 jvm-target 无关（那个由 Gradle toolchain 负责）。
 
 ### 本地联机开发（`runServer` + `runClient`）
 
