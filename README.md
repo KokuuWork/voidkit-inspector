@@ -335,10 +335,21 @@ inspector/
   撞成两个同名模块，JPMS 直接 `ResolutionException`。
 - 测试：`./gradlew test` —— `ChainCluster` / `RollbackPolicy` / `StructureSense`
   都是纯数据计算，不需要起 MC 服务端。
+  **三条版本线实测均 39 个测试全绿**（`build/test-results/test/*.xml`）。
+- 🚨 **`libs/` 里的 core jar 必须与当前分支的 MC 版本一致**。`libs/*.jar` 被
+  `.gitignore` 排除，切分支后它往往还留着上一条线的 core，拿错线的症状分两种：
+  - Gradle 路径：拿 1.21.1 的 core 去编译 1.20.1 线 →
+    `Cannot inline bytecode built with JVM target 21 into ... JVM target 17`；
+  - 离线脚本路径更隐蔽：脚本固定用 JDK 21 + `-jvm-target 21`，字节码版本检查被
+    绕过去，只会看到 core 的包「unresolved reference」，极易误判成 classpath 缺件。
+
+  各线 core 从 kokuucore **同名分支**的 `core/build/devlibs/` 取：
+  `+mc1.21.1-neoforge`（main）/ `+mc1.21.1-forge`（mc/1.21.1-forge）/
+  `+mc1.20.1-forge`（mc/1.20.1）。`tools/offline-test.sh` 启动时会校验并在不匹配时告警。
 - **Gradle 走不通时的备用测试路径**：`./tools/offline-test.sh`
-  （三条版本线都支持，实测各39 个测试全绿）。它绕开 Gradle，直接用
-  `kotlin-compiler-embeddable` + JUnit Launcher 编译并跑测试。当
-  `createMinecraftArtifacts` 卡在 NeoForm Runtime 下载、`--offline` 也救不回来时用它。
+  （三条版本线都支持，实测各 39 个测试全绿，与 `./gradlew test` 结果一致）。
+  它绕开 Gradle，直接用 `kotlin-compiler-embeddable` + JUnit Launcher 编译并跑测试。
+  当 `createMinecraftArtifacts` 卡在 NeoForm Runtime 下载、`--offline` 也救不回来时用它。
   脚本会自动认出当前是哪条线（1.20.1 / 1.21.1 NeoForge / 1.21.1 ForgeGradle 7），
   并自动挑选对应的 MC 制品与 Kotlin 编译器版本 —— 三条线的 classpath 形状完全不同，
   手拼必踩。**注意：脚本里的 `-jvm-target 21` 与 JDK 21 只是编译/运行工具链**，
