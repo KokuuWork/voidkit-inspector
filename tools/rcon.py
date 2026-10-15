@@ -35,8 +35,12 @@ AUTH_FAIL = 2
 
 
 def pack(req_id: int, req_type: int, payload: str) -> bytes:
-    data = payload.encode("utf-8") + b"\x00\x00"
-    return struct.pack("<iii", req_id, req_type, len(data)) + data
+    body = struct.pack("<ii", req_id, req_type) + payload.encode("utf-8") + b"\x00\x00"
+    # 🚨 长度字段 = **长度字段之后**的全部字节数，即 id(4) + type(4) + payload + \x00\x00。
+    #    这里不是 `payload_len + 2` —— 那样服务端读到的 body 会少 8 字节，
+    #    表现为连接被立刻关闭（Thread RCON Client started 后马上 shutting down），
+    #    而服务端日志里**什么都不报**，极难定位。
+    return struct.pack("<i", len(body)) + body
 
 
 def read_all(sock: socket.socket, size: int) -> bytes:
@@ -73,12 +77,24 @@ def main() -> int:
     with sock:
         sock.sendall(pack(1, LOGIN, PASSWORD))
         req_id, req_type, _ = recv_packet(sock)
-        if req_type == AUTH_FAIL:
-            print("[rcon] 认证失败 —— 密码与服务端不一致", file=sys.stderr)
+        # ⚠️ **认证成功与失败的应答 type 都是 2**，只能靠 requestId 区分：
+        #    成功 = 原样回传登录时的 id；失败 = -1（且 payload 为空）。
+        #    把type==2 当失败会得到「明明密码对了却报认证失败」的假象。
+        if req_id == -1:
+            print("[rcon] 认证失败 —— 密码与服务端 rcon.password 不一致", file=sys.stderr)
             return 2
 
         sock.sendall(pack(2, COMMAND, cmd))
-        _, req_type, resp = recv_packet(sock)
+        # ⚠️ **RCON 只在命令返回值 > 0 时才发响应包**（原版 `RconClient` 的行为）。
+        #    返回 0/失败时服务端一个字节都不回 —— 这里必须靠超时兜底，
+        #    否则脚本会抛栈并把原因藏在 socket 超时里。
+        #    这也意味着：不能用 RCON 判断「命令是否成功」，只能看有没有输出。
+        try:
+            sock.settimeout(15.0)
+            _, _, resp = recv_packet(sock)
+        except (socket.timeout, ConnectionError):
+            print("(命令无输出 —— 原版 RCON 在命令返回 0 时不回包)")
+            return 0
         # 命令有输出时会收到多个包，最后一个是空包标记结束
         chunks = [resp] if resp else []
         while True:
