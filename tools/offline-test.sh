@@ -23,6 +23,28 @@ PROJECT="$(pwd)"
 MAIN_SRC="$PROJECT/src/main/kotlin"
 TEST_SRC="$PROJECT/src/test/kotlin"
 
+# 本线的 MC 版本（从 build.gradle 的 mcVersion 读），用于校验 libs/ 里的 core
+MCV=$(grep -o "mcVersion = '[^']*'" "$PROJECT/build.gradle" 2>/dev/null | head -1 | sed "s/.*'\(.*\)'/\1/")
+MCV="${MCV:-未知}"
+
+# ---- 🚨 libs/ 里的 core jar 必须与当前分支的 MC 版本一致 ----
+# libs/ 被 .gitignore 排除，所以切分支后它往往还留着**上一条线**的 core。
+# 用错线的后果分两种：
+#   拿 1.21.1 的 core 去编译 1.20.1 线 → `Cannot inline bytecode built with
+#     JVM target 21 into bytecode that is being built with JVM target 17`；
+#   离线脚本这边更隐蔽 —— 因为脚本固定用 JDK 21 + `-jvm-target 21`，
+#     字节码版本检查被绕过去了，只会看到 core 的包「unresolved reference」，
+#     很容易误判成 classpath 缺件。
+# 各线 core 的来源（kokuucore 同名分支的 core/build/devlibs/）：
+#   voidkit_core-<ver>+mc1.21.1-neoforge.jar← main
+#   voidkit_core-<ver>+mc1.21.1-forge.jar    ← mc/1.21.1-forge
+#   voidkit_core-<ver>+mc1.20.1-forge.jar    ← mc/1.20.1
+CORE=$(ls "$PROJECT"/libs/voidkit_core-*.jar 2>/dev/null | head -1)
+if [ -n "$CORE" ] && ! echo "$(basename "$CORE")" | grep -q "+mc${MCV}-"; then
+  echo "[test] ⚠️  libs/ 里的 core 与本线（$MCV）不匹配：$(basename "$CORE")" >&2
+  echo "[test]    请从 kokuucore 同名分支的 core/build/devlibs/ 拷对应版本过来。" >&2
+fi
+
 # ---- 三条版本线各有各的 classpath 形状，先认线再选依赖 ----
 #FLINE=neoforge|forge1201|forge1211
 FLINE=neoforge
