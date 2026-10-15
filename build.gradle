@@ -45,6 +45,40 @@ neoForge {
             sourceSet(sourceSets.main)
         }
     }
+
+    runs {
+        // 开发服务端：core + inspector 都从 classpath 加载，与整合包真实加载路径一致
+        server {
+            server()
+            programArgument '--nogui'
+            // 与下面的 client run 共用一个目录约定，便于清理与查看产物
+            gameDirectory = file('build/devserver')
+        }
+
+        // 开发客户端：**Inspector 是纯服务端模组，没有客户端 jar** —— 这个 run
+        // 起的是**光秃秃的原版 1.21.1 客户端**，唯一任务是当「真人玩家」连进上面的
+        // 开发服务端，走一遍真实的登录 → 破坏 → 审计入库链路。
+        // E2E 脚本只能验「模组被加载 + 库被建」，验不到「玩家操作真的被记下来」。
+        //
+        // ⚠️ 必须用**离线账号**（--accessToken 0 +固定 uuid），
+        //    否则 dev launcher 会去 Mojang 认证，本机没正版账号直接卡在登录界面。
+        // ⚠️ server 端口写死 25565：client 的 --port 必须与之一致，
+        //    两边都在同一个 project 里，用一个常量避免改一边忘另一边。
+        client {
+            client()
+            gameDirectory = file('build/devclient')
+            programArgument '--username'
+            programArgument 'VoidkitTester'
+            programArgument '--uuid'
+            programArgument '00000000-0000-0000-0000-000000000001'
+            programArgument '--accessToken'
+            programArgument '0'
+            programArgument '--server'
+            programArgument '127.0.0.1'
+            programArgument '--port'
+            programArgument '25565'
+        }
+    }
 }
 
 dependencies {
