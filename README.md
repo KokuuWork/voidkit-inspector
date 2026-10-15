@@ -227,6 +227,11 @@ ME 网络照样瘫。所以回滚做了五层设计（见下文），核心原�
   这是刻意的：**查看历史**与**改写世界**不该是同一个权限。
 - 没装 `voidkit_perm` 时按原版 OP 判定（**只有 OP 能用**）。审计权限敏感，
   **刻意不并入 `voidkit.admin`** —— 应该单独授予，而不是「给了管理总权限就顺带拿到审计与回滚」。
+- ⚠️ **「权限不足」时 Brigadier 报的是 `Unknown command`**，报错完全看不出是
+  `requires` 没通过。玩家说「命令不存在」时，先查权限节点，而不是查注册逻辑。
+- `here` / `on|off` / `lookup` / `page` / `chain` / `rollback` / `preview` 都**需要玩家实体**：
+  在控制台、RCON、命令方块里执行会得到「仅玩家可用」（RCON 读不到这条，因为
+  RCON 只在命令返回 0 之外才回包 —— 见下）。`status` 与 `purge` 没有这个限制。
 
 ## 架构
 
@@ -357,6 +362,12 @@ python tools/rcon.py "coi preview actor=VoidkitTester"
 对无玩家实体的命令源直接放行），所以它能证明「命令注册 + 参数解析 + 执行」都正常，
 **但证不了玩家权限**。验玩家权限必须回真客户端里敲。
 
+> 原版 RCON 只在命令**返回值 > 0** 时才发响应包，返回 0（失败）时一个字节都不回。
+> 所以 RCON 只能验「有没有输出」，不能验「成功还是失败」——
+> `tools/rcon.py` 靠超时兜底并打印「命令无输出」而不是抛栈。
+
+### 端到端验证
+
 > 顺带记一笔最容易误判的现象：**权限不足时 Brigadier 报的是 `Unknown command`**，
 > 完全看不出是 `requires` 没通过。加新命令时若「玩家说命令不存在」，
 > 先确认 `.requires(...)` 的权限节点，而不是查注册逻辑。
@@ -422,3 +433,20 @@ SERVER_DIR=<已装好的服务端目录> ./tools/e2e-<版本线>-server.sh
 判据不是「服务端起来了」—— mods.toml 写错时 mod 会被**静默跳过**，`Done` 照样出现。
 真正的判据是core 的模块统计里 `voidkit_inspector(1)` + `voidkit/inspector/inspector.db`
 的 WAL 有实际写入（证明事件桥真的被调用、jarJar 的 SQLite 原生库可用）。
+
+### 玩家操作是真的入库了
+
+E2E 脚本只能验「模组活着」，验不了「审计记的对不对」。后者必须**起真客户端进真服**、
+亲手放几个方块，然后直接读库：
+
+```
+$ python - <<'PY'
+import sqlite3; …
+# 汇总：[('PLACE','PLAYER',42), ('BREAK','PLAYER',10)]
+# 最近：#52 (-1,-60,-9) PLACE minecraft:smooth_stone src=PLAYER
+# actor：VoidkitTester / b85366b837e637cda6b5442553385c92 / kind=0
+PY
+```
+
+这一条同时证明了四件事：事件桥被调用、`source=PLAYER` 分类正确、
+玩家 uuid 与名字都落库、SQLite 的 WAL 真的在写。
