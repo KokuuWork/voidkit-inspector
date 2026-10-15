@@ -309,7 +309,8 @@ inspector/
 ./fetch-core.sh        # 从 voidkit Release 下载 voidkit_core jar到 libs/
                        # 默认按当前分支自动推断版本线（MC 版本 + 加载器）
 ./build.sh build       # →build/libs/voidkit_inspector-<版本>+mc<版本>-<加载器>.jar
-./build.sh runServer   # 开发服务端
+./build.sh runServer   # 开发服务端（build/devserver/，已预置离线+创造+OP+RCON）
+./build.sh runClient   # 开发客户端（直连 127.0.0.1，自动以 VoidkitTester 身份进服）
 ```
 
 三条版本线的构建配置各不相同（**代码逐行相同，差的只有构建与平台层**）：
@@ -329,6 +330,50 @@ inspector/
   撞成两个同名模块，JPMS 直接 `ResolutionException`。
 - 测试：`./gradlew test` —— `ChainCluster` / `RollbackPolicy` / `StructureSense`
   都是纯数据计算，不需要起 MC 服务端。
+
+### 本地联机开发（`runServer` + `runClient`）
+
+比脚本 E2E 更强的验证：起真客户端进真服，真手放/破方块，然后直接读审计库。
+
+```bash
+./gradlew runServer   # 先起，等日志出现 "Done (…)" + "审计数据库就绪"
+./gradlew runClient   # 原版 1.21.1 客户端，自动连 127.0.0.1（离线账号 VoidkitTester）
+```
+
+`build/devserver/` 的配置由 Gradle 的 `syncDevServerConfig` 在启动前写入
+（离线 + 创造 + 超平坦 + `VoidkitTester` 给 level 4 + RCON 25575）。
+**不能手工改** `server.properties` / `ops.json` —— 服务端启动时会把它们读进来再写回去，
+手改必被覆盖。
+
+验证命令链路不必手敲键盘，走 RCON 更可靠：
+
+```bash
+python tools/rcon.py "coi status"
+python tools/rcon.py "coi here"
+python tools/rcon.py "coi preview actor=VoidkitTester"
+```
+
+⚠️ RCON 的命令源**永远绕过 `requires` 判定**（core 的 `VanillaPermissionProvider.admin`
+对无玩家实体的命令源直接放行），所以它能证明「命令注册 + 参数解析 + 执行」都正常，
+**但证不了玩家权限**。验玩家权限必须回真客户端里敲。
+
+> 顺带记一笔最容易误判的现象：**权限不足时 Brigadier 报的是 `Unknown command`**，
+> 完全看不出是 `requires` 没通过。加新命令时若「玩家说命令不存在」，
+> 先确认 `.requires(...)` 的权限节点，而不是查注册逻辑。
+
+### dev run 的三个坑（ModDevGradle）
+
+- **core 必须放`gameDirectory/mods/`**，不能靠 `additionalRuntimeClasspath`：
+  后者只提供**类**，FML 仍认为该 mod 未安装，报
+  `Mod voidkit_inspector requires voidkit_core … Currently, voidkit_core is not installed`。
+  `runServer` 会扫 `mods/`，放进去才被当合法 mod 加载。
+- **jarJar 与 `additionalRuntimeClasspath` 只能二选一**：core jarJar 里已含一份
+  `kotlin-stdlib`，classpath 上再补一份，JPMS 看到两个同名模块直接拒绝解析 ——
+  `ResolutionException: Module neoforge.coremods reads more than one module named kotlin.stdlib`。
+  `additionalRuntimeClasspath` 只补SQLite 原生库。
+- **`RunModel` 只能挂 `sourceSet`，不能挂外部 jar**（`ModModel` 只有
+  `getModModSourceSets()`）；清空内置 mod 用 `loadedMods.set([] as Set)`，
+  Groovy 的 `SetProperty` **没有 `clear()`**。
 
 ### 跨版本移植时踩过的坑
 
