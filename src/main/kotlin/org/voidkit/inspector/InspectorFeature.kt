@@ -692,7 +692,7 @@ class InspectorFeature : Feature() {
     }
 
     private fun setMode(source: CommandSourceStack, on: Boolean): Int {
-        val player = source.player ?: return 0
+        val player = source.player ?: run { Msg.err(source, "仅玩家可用"); return 0 }
         if (on) {
             inspecting.add(player.uuid)
             Msg.ok(player, "检查模式已开启")
@@ -704,7 +704,9 @@ class InspectorFeature : Feature() {
     }
 
     private fun inspectHere(source: CommandSourceStack): Int {
-        val player = source.player ?: return 0
+        // 无玩家实体（控制台 / RCON / 命令方块）时给出明确提示。
+        // 原来直接 `return 0` 静默失败，玩家在命令方块里用会以为命令坏了。
+        val player = source.player ?: run { Msg.err(source, "仅玩家可用"); return 0 }
         val hit = player.pick(20.0, 0f, false)
         if (hit is BlockHitResult) {
             inspectBlock(player, hit.blockPos)
@@ -724,7 +726,7 @@ class InspectorFeature : Feature() {
     }
 
     private fun page(source: CommandSourceStack): Int {
-        val player = source.player ?: return 0
+        val player = source.player ?: run { Msg.err(source, "仅玩家可用"); return 0 }
         pageNext(player)
         return 1
     }
