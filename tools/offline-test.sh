@@ -23,14 +23,20 @@ PROJECT="$(pwd)"
 MAIN_SRC="$PROJECT/src/main/kotlin"
 TEST_SRC="$PROJECT/src/test/kotlin"
 
-# ---- JDK 与 MC 制品：按分支一起定（1.20.1 线 = JDK 17 + Forge，
-#      1.21.x 线 = JDK 21 + NeoForge）。顺序不能颠倒：TARGET 在下面才算出来。
-TARGET=21
-MC_JAR=""; FML=""; FML_LANG=""; FML_LOW=""; FML_SJH=""; BUS=""
-if grep -q "mcVersion = '1.20.1'" "$PROJECT/build.gradle" 2>/dev/null \
-   && ls "$PROJECT"/build/moddev/artifacts/forge-1.20.1-*-merged.jar >/dev/null 2>&1; then
-  TARGET=17
+# ---- 三条版本线各有各的 classpath 形状，先认线再选依赖 ----
+#FLINE=neoforge|forge1201|forge1211
+FLINE=neoforge
+grep -q "mcVersion = '1.20.1'" "$PROJECT/build.gradle" 2>/dev/null && FLINE=forge1201
+#🚨 ForgeGradle 7 线（1.21.1-forge）的判据是**存在 build/cp.txt**：
+#   FG7 用 mavenizer，把「用户开发环境」的完整 classpath（含 patched MC
+#   的 forge-1.21.1-52.1.19.jar）落在 build/ 下。它跟另外两条线的
+#   `build/moddev/artifacts/*-merged.jar` 完全不是一个形状，手拼必然漏件。
+if [ "$FLINE" != "forge1201" ] && [ -f "$PROJECT/build/cp.txt" ]; then
+  FLINE=forge1211
 fi
+
+TARGET=21
+[ "$FLINE" = "forge1201" ] && TARGET=17
 # ---- 编译与运行**一律用 JDK 21**（即使当前分支是 1.20.1 线）。
 #
 #🚨 为什么不能用分支自己的 JDK（1.20.1 线是 17）：
@@ -50,47 +56,82 @@ GC="$HOME/.gradle/caches"
 work() { cygpath -w "$1"; }
 
 # ---- 编译器 classpath ----
-GCP=$(find "$GC" \( -name "kotlin-compiler-embeddable-2.1.0.jar" -o -name "kotlin-stdlib-2.1.0.jar" \
-  -o -name "kotlin-reflect-2.1.0.jar" -o -name "kotlin-script-runtime-2.1.0.jar" \
-  -o -name "kotlin-daemon-embeddable-2.1.0.jar" -o -name "trove4j-*.jar" \
-  -o -name "kotlinx-coroutines-core-jvm-1.8.0.jar" -o -name "annotations-13.0.jar" \) 2>/dev/null \
-  | while read -r f; do work "$f"; done | paste -sd ';' -)
+# 🚨 **Kotlin 编译器版本必须与依赖 classpath 里的 kotlin-stdlib 一致**，
+#    否则报 `module was compiled with an incompatible version of Kotlin.
+#    The binary version of its metadata is 2.4.0, expected version is 2.1.0`，
+#    而且后续会退化成 `FileAnalysisException: source must not be null`
+#    这种完全看不出原因的分析期异常。
+#    ForgeGradle 7 线（build/cp.txt）里躺的是 kotlin-stdlib **2.4.21**，
+#    所以那条线必须用 2.4.21 的 compiler-embeddable。
+KOTV=2.1.0
+[ "$FLINE" = "forge1211" ] && KOTV=2.4.21
+[ -d "$GC/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compiler-embeddable/$KOTV" ] || KOTV=2.1.0
+GCP=$(for n in kotlin-compiler-embeddable kotlin-stdlib kotlin-reflect kotlin-script-runtime kotlin-daemon-embeddable; do
+    find "$GC/modules-2/files-2.1/org.jetbrains.kotlin/$n/$KOTV" -name "*.jar" 2>/dev/null | grep -v sources | head -1
+  done
+  find "$GC/modules-2/files-2.1/org.jetbrains.intellij.deps/trove4j" -name "*.jar" 2>/dev/null | head -1
+  find "$GC/modules-2/files-2.1/org.jetbrains/annotations/13.0" -name "*.jar" 2>/dev/null | head -1
+  # 🚨 2.4.21 的 compiler-embeddable 依赖 kotlinx-coroutines（2.1.0 那版
+  #    把 coroutines 拆进了 daemon-embeddable），漏了会抛
+  #    `NoClassDefFoundError: kotlinx/coroutines/CoroutineScope`。
+  find "$GC/modules-2/files-2.1/org.jetbrains.kotlinx/kotlinx-coroutines-core-jvm/1.8.0" -name "*.jar" 2>/dev/null | head -1
+)
+# ⚠️ 这里必须**先收集再转换**：`VAR=$(...) | while ...` 会让赋值发生在管道
+#    的子 shell 里，`set -u` 下父 shell 立刻报`VAR: unbound variable`。
+GCP=$(printf '%s\n' "$GCP" | grep -v '^$' | while read -r f; do work "$f"; done | paste -sd ';' -)
+echo "[test] 版本线：$FLINE（Kotlin $KOTV）"
 
 # ---- 依赖 classpath：**一个版本都不许混** ----
-# 1.20.1 线用 forge-*-merged.jar + FML 1.x，1.21.x 线用 neoforge-*-merged.jar + FML 4.x
-if [ "$TARGET" = "17" ]; then
-  MC_JAR=$(ls "$PROJECT"/build/moddev/artifacts/forge-1.20.1-*-merged.jar | head -1)
-  FML=$(ls "$GC"/modules-2/files-2.1/net.minecraftforge/fmlcore/1.20.1-*/fmlcore-1.20.1-*.jar 2>/dev/null | grep -v sources | tail -1)
-  # 🚨 `net.minecraftforge.fml.common.Mod` 注解在 **javafmllanguage** 里，
-  #    不在 fmlcore / fmlloader —— 漏了它会报 `unresolved reference 'Mod'`。
-  FML_LANG=$(ls "$GC"/modules-2/files-2.1/net.minecraftforge/javafmllanguage/1.20.1-*/*/javafmllanguage-1.20.1-*.jar 2>/dev/null | grep -v sources | tail -1)
-  FML_LOW=$(ls "$GC"/modules-2/files-2.1/net.minecraftforge/lowcodelanguage/*/*/lowcodelanguage-*.jar 2>/dev/null | grep -v sources | tail -1)
-  FML_SJH=$(ls "$GC"/modules-2/files-2.1/net.minecraftforge/securejarhandler/*/*/securejarhandler-*.jar 2>/dev/null | grep -v sources | tail -1)
-  BUS=$(ls "$GC"/modules-2/files-2.1/net.minecraftforge/eventbus/*/*/eventbus-*.jar 2>/dev/null | grep -v sources | tail -1)
+if [ "$FLINE" = "forge1211" ]; then
+  # FG7 线：直接用 Gradle 算出来的 cp.txt，只做两件事 ——
+  #   ① 滤掉 *.zip（mappings_official），它不是 jar，进 classpath 会让
+  #      kotlinc 在分析期抛 `IllegalArgumentException: source must not be null`；
+  #   ② 滤掉 -sources.jar。
+  # 🚨 cp.txt 里的 core 条目指向的是**上一次构建时的文件名**（比如
+  #    `voidkit_core-0.1.0-beta.1+mc1.21.1-forge.jar`），core 升版后那个文件
+  #    已经不存在 —— 不换掉的话 core 的整个包（`org.voidkit.core.util.Text` 等）
+  #    会静默变成 unresolved reference。统一换成 libs/ 里现存的唯一那个。
+  CORE=$(ls "$PROJECT"/libs/voidkit_core-*.jar 2>/dev/null | head -1)
+  DEPS=$(tr ';' '\n' < "$PROJECT/build/cp.txt" | grep -Ei '\.jar$' | grep -v -- '-sources\.jar$' \
+    | grep -v 'voidkit_core' | while read -r f; do work "$f"; done | paste -sd ';' -)
+  [ -n "$CORE" ] && DEPS="$(work "$CORE");$DEPS"
 else
-  MC_JAR=$(ls "$PROJECT"/build/moddev/artifacts/neoforge-*-merged.jar 2>/dev/null | head -1)
-  FML=$(ls "$GC"/modules-2/files-2.1/net.neoforged.fancymodloader/loader/4.0.39/*/loader-4.0.39.jar 2>/dev/null)
-  BUS=$(ls "$GC"/modules-2/files-2.1/net.neoforged/bus/*/*/bus-*.jar 2>/dev/null | grep -v sources | head -1)
+  MC_JAR=""
+  FML=""; FML_LANG=""; FML_LOW=""; FML_SJH=""; BUS=""
+  if [ "$FLINE" = "forge1201" ]; then
+    MC_JAR=$(ls "$PROJECT"/build/moddev/artifacts/forge-1.20.1-*-merged.jar | head -1)
+    FML=$(ls "$GC"/modules-2/files-2.1/net.minecraftforge/fmlcore/1.20.1-*/fmlcore-1.20.1-*.jar 2>/dev/null | grep -v sources | tail -1)
+    # 🚨 `net.minecraftforge.fml.common.Mod` 注解在 **javafmllanguage** 里，
+    #    不在 fmlcore / fmlloader —— 漏了它会报 `unresolved reference 'Mod'`。
+    FML_LANG=$(ls "$GC"/modules-2/files-2.1/net.minecraftforge/javafmllanguage/1.20.1-*/*/javafmllanguage-1.20.1-*.jar 2>/dev/null | grep -v sources | tail -1)
+    FML_LOW=$(ls "$GC"/modules-2/files-2.1/net.minecraftforge/lowcodelanguage/*/*/lowcodelanguage-*.jar 2>/dev/null | grep -v sources | tail -1)
+    FML_SJH=$(ls "$GC"/modules-2/files-2.1/net.minecraftforge/securejarhandler/*/*/securejarhandler-*.jar 2>/dev/null | grep -v sources | tail -1)
+    BUS=$(ls "$GC"/modules-2/files-2.1/net.minecraftforge/eventbus/*/*/eventbus-*.jar 2>/dev/null | grep -v sources | tail -1)
+  else
+    MC_JAR=$(ls "$PROJECT"/build/moddev/artifacts/neoforge-*-merged.jar 2>/dev/null | head -1)
+    FML=$(ls "$GC"/modules-2/files-2.1/net.neoforged.fancymodloader/loader/4.0.39/*/loader-4.0.39.jar 2>/dev/null)
+    BUS=$(ls "$GC"/modules-2/files-2.1/net.neoforged/bus/*/*/bus-*.jar 2>/dev/null | grep -v sources | head -1)
+  fi
+  [ -z "$MC_JAR" ] && { echo "[test] 找不到 MC 制品，先跑一次 ./build.sh build" >&2; exit 2; }
+  DEPS=$(
+    { ls "$PROJECT"/libs/voidkit_core-*.jar 2>/dev/null
+      echo "$MC_JAR"
+      ls "$GC"/modules-2/files-2.1/com.mojang/brigadier/1.3.10/*/brigadier-1.3.10.jar 2>/dev/null
+      ls "$GC"/modules-2/files-2.1/com.google.code.gson/gson/2.9.0/*/gson-2.9.0.jar 2>/dev/null
+      ls "$GC"/modules-2/files-2.1/com.mojang/datafixerupper/6.0.8/*/datafixerupper-6.0.8.jar 2>/dev/null
+      ls "$GC"/modules-2/files-2.1/com.mojang/authlib/*/*/authlib-*.jar 2>/dev/null | grep -v sources | head -1
+      ls "$GC"/modules-2/files-2.1/org.slf4j/slf4j-api/2.0.*/*/slf4j-api-2.0.*.jar 2>/dev/null | grep -v sources | head -1
+      ls "$GC"/modules-2/files-2.1/com.google.guava/guava/31.1-jre/*/guava-31.1-jre.jar 2>/dev/null
+      ls "$GC"/modules-2/files-2.1/it.unimi.dsi/fastutil/*/*/fastutil-*.jar 2>/dev/null | grep -v sources | head -1
+      ls "$GC"/modules-2/files-2.1/org.joml/joml/*/*/joml-*.jar 2>/dev/null | grep -v sources | head -1
+      ls "$GC"/modules-2/files-2.1/org.apache.commons/commons-lang3/*/*/commons-lang3-*.jar 2>/dev/null | grep -v sources | head -1
+      # 加载器相关的 5 个包：走变量，避免 NeoForge FML 4.x 与 Forge FML 1.x 混进同一条命令
+      echo "$BUS"; echo "$FML"; echo "$FML_LANG"; echo "$FML_LOW"; echo "$FML_SJH"
+      ls "$GC"/modules-2/files-2.1/org.xerial/sqlite-jdbc/3.5*/*/sqlite-jdbc-3.5*.jar 2>/dev/null | grep -v sources | head -1
+    } 2>/dev/null | grep -v '^$' | sort -u | while read -r f; do work "$f"; done | paste -sd ';' -
+  )
+  DEPS="$DEPS;$(find "$GC/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/$KOTV" -name "*.jar" 2>/dev/null | grep -v sources | head -1 | while read -r f; do work "$f"; done)"
 fi
-[ -z "$MC_JAR" ] && { echo "[test] 找不到 MC 制品，先跑一次 ./build.sh build" >&2; exit 2; }
-DEPS=$(
-  { ls "$PROJECT"/libs/voidkit_core-*.jar 2>/dev/null
-    echo "$MC_JAR"
-    ls "$GC"/modules-2/files-2.1/com.mojang/brigadier/1.3.10/*/brigadier-1.3.10.jar 2>/dev/null
-    ls "$GC"/modules-2/files-2.1/com.google.code.gson/gson/2.9.0/*/gson-2.9.0.jar 2>/dev/null
-    ls "$GC"/modules-2/files-2.1/com.mojang/datafixerupper/6.0.8/*/datafixerupper-6.0.8.jar 2>/dev/null
-    ls "$GC"/modules-2/files-2.1/com.mojang/authlib/*/*/authlib-*.jar 2>/dev/null | grep -v sources | head -1
-    ls "$GC"/modules-2/files-2.1/org.slf4j/slf4j-api/2.0.*/*/slf4j-api-2.0.*.jar 2>/dev/null | grep -v sources | head -1
-    ls "$GC"/modules-2/files-2.1/com.google.guava/guava/31.1-jre/*/guava-31.1-jre.jar 2>/dev/null
-    ls "$GC"/modules-2/files-2.1/it.unimi.dsi/fastutil/*/*/fastutil-*.jar 2>/dev/null | grep -v sources | head -1
-    ls "$GC"/modules-2/files-2.1/org.joml/joml/*/*/joml-*.jar 2>/dev/null | grep -v sources | head -1
-    ls "$GC"/modules-2/files-2.1/org.apache.commons/commons-lang3/*/*/commons-lang3-*.jar 2>/dev/null | grep -v sources | head -1
-    # 加载器相关的 5 个包：走变量，避免 NeoForge FML 4.x 与 Forge FML 1.x 混进同一条命令
-    echo "$BUS"; echo "$FML"; echo "$FML_LANG"; echo "$FML_LOW"; echo "$FML_SJH"
-    ls "$GC"/modules-2/files-2.1/org.xerial/sqlite-jdbc/3.5*/*/sqlite-jdbc-3.5*.jar 2>/dev/null | grep -v sources | head -1
-  } 2>/dev/null | grep -v '^$' | sort -u | while read -r f; do work "$f"; done | paste -sd ';' -
-)
-DEPS="$DEPS;$(ls "$GC"/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.1.0/*/kotlin-stdlib-2.1.0.jar 2>/dev/null | head -1 | while read -r f; do work "$f"; done)"
 
 if [ "${1:-}" = "--print-cp" ]; then echo "$DEPS"; exit 0; fi
 
